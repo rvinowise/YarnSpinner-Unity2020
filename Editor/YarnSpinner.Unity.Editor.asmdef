@@ -26,7 +26,13 @@
         "Yarn.System.Memory.dll",
         "Yarn.System.Numerics.Vectors.dll",
         "Yarn.System.Reflection.TypeExtensions.dll",
-        "Yarn.System.Runtime.CompilerServices.Unsafe.dll"
+        "Yarn.System.Runtime.CompilerServices.Unsafe.dll",
+        "Microsoft.CodeAnalysis.dll",
+        "Microsoft.CodeAnalysis.CSharp.dll",
+        "System.Collections.Immutable.dll",
+        "System.Reflection.Metadata.dll",
+        "System.Runtime.CompilerServices.Unsafe.dll",
+        "Yarn.System.Text.Json.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],
@@ -45,6 +51,21 @@
             "name": "com.unity.localization",
             "expression": "1.0.0",
             "define": "USE_UNITY_LOCALIZATION"
+        },
+        {
+            "name": "com.unity.ugui",
+            "expression": "2.0.0",
+            "define": "USE_TMP"
+        },
+        {
+            "name": "com.unity.textmeshpro",
+            "expression": "1.0.0",
+            "define": "USE_TMP"
+        },
+        {
+            "name": "Unity",
+            "expression": "2022.3.33f1",
+            "define": "UNITY_2022_3_33_OR_NEWER"
         }
     ],
     "noEngineReferences": false

@@ -1,10 +1,10 @@
-﻿using System.Collections.Generic;
+/*
+Yarn Spinner is licensed to you under the terms found in the file LICENSE.md.
+*/
+
+using System.Collections.Generic;
 using UnityEditor;
-#if UNITY_2020_2_OR_NEWER
 using UnityEditor.AssetImporters;
-#else
-using UnityEditor.Experimental.AssetImporters;
-#endif
 using UnityEngine;
 using System.Linq;
 using Yarn.Compiler;
@@ -13,533 +13,794 @@ using UnityEditorInternal;
 using System.Collections;
 using System.Reflection;
 
+#nullable enable
+
 #if USE_ADDRESSABLES
 using UnityEditor.AddressableAssets;
 #endif
 
-#if USE_UNITY_LOCALIZATION && YARN_ENABLE_EXPERIMENTAL_FEATURES
+#if USE_UNITY_LOCALIZATION
 using UnityEditor.Localization;
 using UnityEngine.Localization.Tables;
 #endif
 
+using UnityEngine.UIElements;
+using UnityEditor.UIElements;
+using System;
+
 namespace Yarn.Unity.Editor
 {
+
     [CustomEditor(typeof(YarnProjectImporter))]
     public class YarnProjectImporterEditor : ScriptedImporterEditor
     {
         // A runtime-only field that stores the defaultLanguage of the
         // YarnProjectImporter. Used during Inspector GUI drawing.
-        internal static SerializedProperty CurrentProjectDefaultLanguageProperty;
+        internal static SerializedProperty? CurrentProjectDefaultLanguageProperty;
 
-        private SerializedProperty compileErrorsProperty;
-        private SerializedProperty serializedDeclarationsProperty;
-        private SerializedProperty defaultLanguageProperty;
-        private SerializedProperty sourceScriptsProperty;
-        private SerializedProperty languagesToSourceAssetsProperty;
-        private SerializedProperty useAddressableAssetsProperty;
+        internal const string ProjectUpgradeHelpURL = "https://docs.yarnspinner.dev/using-yarnspinner-with-unity/importing-yarn-files/yarn-projects#upgrading-yarn-projects";
+        internal const string CreateNewIssueURL = "https://github.com/YarnSpinnerTool/YarnSpinner-Unity/issues/new?assignees=&labels=bug&projects=&template=bug_report.md&title=Project Import Error";
+        internal const string AddStringTagsButtonLabel = "Add Line Tags to Yarn Scripts";
+        internal const string GenerateStringsFileButtonLabel = "Export Strings and Metadata as CSV";
+        internal const string UpdateExistingStringsFilesButtonLabel = "Update Existing Strings Files";
 
-        private ReorderableDeclarationsList serializedDeclarationsList;
-        private SerializedProperty searchAllAssembliesProperty;
-        private SerializedProperty assembliesToSearchProperty;
+        private SerializedProperty? useAddressableAssetsProperty;
 
-        private SerializedProperty predeterminedFunctionsProperty;
 
-#if YARN_ENABLE_EXPERIMENTAL_FEATURES
-        private SerializedProperty useUnityLocalisationSystemProperty;
-        private SerializedProperty unityLocalisationTableCollectionProperty;
+        public VisualTreeAsset? editorUI;
+        public VisualTreeAsset? localizationUIAsset;
+        public VisualTreeAsset? sourceFileUIAsset;
+        public StyleSheet? yarnProjectStyleSheet;
+
+        private VisualElement? uiRoot;
+
+        private string? baseLanguage = null;
+        private List<LocalizationEntryElement> localizationEntryFields = new List<LocalizationEntryElement>();
+        private List<SourceFileEntryElement> sourceEntryFields = new List<SourceFileEntryElement>();
+
+        private VisualElement? localisationFieldsContainer;
+        private VisualElement? sourceFileEntriesContainer;
+        private VisualElement? variableStorageSettingsContainer;
+
+        private SerializedProperty? generateVariablesSourceFileProperty;
+        private SerializedProperty? variablesClassNameProperty;
+        private SerializedProperty? variablesClassNamespaceProperty;
+        private SerializedProperty? variablesClassParentProperty;
+
+#if USE_UNITY_LOCALIZATION
+        private SerializedProperty? useUnityLocalisationSystemProperty;
+        private SerializedProperty? unityLocalisationTableCollectionGUIDProperty;
 #endif
+
+        private bool AnyModifications
+        {
+            get
+            {
+                return AnyLocalisationModifications
+                || AnySourceFileModifications
+                ;
+            }
+        }
+
+        private bool AnyLocalisationModifications => LocalisationsAddedOrRemoved || localizationEntryFields.Any(f => f.IsModified) || BaseLanguageNameModified || StringTableModified;
+
+        private bool AnySourceFileModifications => SourceFilesAddedOrRemoved || sourceEntryFields.Any(f => f.IsModified);
+
+        private bool LocalisationsAddedOrRemoved = false;
+        private bool BaseLanguageNameModified = false;
+        private bool SourceFilesAddedOrRemoved = false;
+        private bool StringTableModified = false;
 
         public override void OnEnable()
         {
             base.OnEnable();
-            sourceScriptsProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.sourceScripts));
-            compileErrorsProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.compileErrors));
-            serializedDeclarationsProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.serializedDeclarations));
-
-            defaultLanguageProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.defaultLanguage));
-            languagesToSourceAssetsProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.languagesToSourceAssets));
 
             useAddressableAssetsProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.useAddressableAssets));
 
-            serializedDeclarationsList = new ReorderableDeclarationsList(serializedObject, serializedDeclarationsProperty);
-
-            searchAllAssembliesProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.searchAllAssembliesForActions));
-            assembliesToSearchProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.assembliesToSearch));
-
-            predeterminedFunctionsProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.ListOfFunctions));
-
-#if USE_UNITY_LOCALIZATION && YARN_ENABLE_EXPERIMENTAL_FEATURES
+#if USE_UNITY_LOCALIZATION
             useUnityLocalisationSystemProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.UseUnityLocalisationSystem));
-            unityLocalisationTableCollectionProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.unityLocalisationStringTableCollection));
+            unityLocalisationTableCollectionGUIDProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.unityLocalisationStringTableCollectionGUID));
 #endif
+
+            generateVariablesSourceFileProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.generateVariablesSourceFile));
+            variablesClassNameProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.variablesClassName));
+            variablesClassNamespaceProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.variablesClassNamespace));
+            variablesClassParentProperty = serializedObject.FindProperty(nameof(YarnProjectImporter.variablesClassParent));
         }
 
-        public override void OnInspectorGUI()
+        public override void OnDisable()
         {
-            serializedObject.Update();
+            base.OnDisable();
 
-            YarnProjectImporter yarnProjectImporter = serializedObject.targetObject as YarnProjectImporter;
-
-            EditorGUILayout.Space();
-
-            if (sourceScriptsProperty.arraySize == 0)
+            if (AnyModifications)
             {
-                EditorGUILayout.HelpBox("This Yarn Project has no content. Add Yarn Scripts to it.", MessageType.Warning);
-            }
-            EditorGUILayout.PropertyField(sourceScriptsProperty, true);
-
-            EditorGUILayout.Space();
-
-            bool hasCompileError = compileErrorsProperty.arraySize > 0;
-
-            if (hasCompileError)
-            {
-                foreach (SerializedProperty compileError in compileErrorsProperty) {
-                    EditorGUILayout.HelpBox(compileError.stringValue, MessageType.Error);
-                }
-            }
-
-            serializedDeclarationsList.DrawLayout();
-
-            // The 'Convert Implicit Declarations' feature has been
-            // temporarily removed in v2.0.0-beta5.
-
-#if false
-            // If any of the serialized declarations are implicit, add a
-            // button that lets you generate explicit declarations for them
-            var anyImplicitDeclarations = false;
-            foreach (SerializedProperty declProp in serializedDeclarationsProperty) {
-                anyImplicitDeclarations |= declProp.FindPropertyRelative("isImplicit").boolValue;
-            }
-            
-            if (hasCompileError == false && anyImplicitDeclarations) {
-                if (GUILayout.Button("Convert Implicit Declarations")) {
-                    // add explicit variable declarations to the file
-                    YarnProjectUtility.ConvertImplicitVariableDeclarationsToExplicit(yarnProjectImporter);
-
-                    // Return here becuase this method call will cause the
-                    // YarnProgram contents to change, which confuses the
-                    // SerializedObject when we're in the middle of a GUI
-                    // draw call. So, stop here, and let Unity re-draw the
-                    // Inspector (which it will do on the next editor tick
-                    // because the item we're inspecting got re-imported.)
-                    return;
-                }
-            }
-#endif
-
-            EditorGUILayout.PropertyField(defaultLanguageProperty, new GUIContent("Base Language"));
-
-            CurrentProjectDefaultLanguageProperty = defaultLanguageProperty;
-
-#if USE_UNITY_LOCALIZATION && YARN_ENABLE_EXPERIMENTAL_FEATURES
-            EditorGUILayout.PropertyField(useUnityLocalisationSystemProperty, new GUIContent("Use Unity's Built-in Localisation System"));
-
-            // if we are using the unity localisation system we need a field to add in the string table
-            // and we also disable the in-built localisation system while we are at it for its unnecessary
-            if (useUnityLocalisationSystemProperty.boolValue)
-            {
-                EditorGUI.indentLevel += 1;
-                EditorGUILayout.PropertyField(unityLocalisationTableCollectionProperty, new GUIContent("String Table Collection"));
-                EditorGUI.indentLevel -= 1;
-                EditorGUILayout.Space();
-            }
-            else
-            {
-                EditorGUILayout.PropertyField(languagesToSourceAssetsProperty, new GUIContent("Localisations"));
-            }
-#else
-            EditorGUILayout.PropertyField(languagesToSourceAssetsProperty, new GUIContent("Localisations"));
-#endif
-
-
-            // Determines whether or not we draw the GUI for the internal Yarn
-            // localisation system.
-            bool showInternalLocalizationGUI;
-
-#if USE_UNITY_LOCALIZATION && YARN_ENABLE_EXPERIMENTAL_FEATURES
-            // If Unity Localization is available, then we draw the internal
-            // localization system's UI if we've chosen not to use Unity's.
-            showInternalLocalizationGUI = !useUnityLocalisationSystemProperty.boolValue;
-#else
-            // If Unity Localization is not available, we always draw the
-            // internal localization system UI.
-            showInternalLocalizationGUI = true;
-#endif
-
-            CurrentProjectDefaultLanguageProperty = null;
-
-            // Ask the project importer if it can generate a strings table.
-            // This involves querying several assets, which means various
-            // exceptions might get thrown, which we'll catch and log (if
-            // we're in debug mode).
-            bool canGenerateStringsTable;
-
-            try
-            {
-                canGenerateStringsTable = yarnProjectImporter.CanGenerateStringsTable;
-            }
-            catch (System.Exception e)
-            {
-#if YARNSPINNER_DEBUG
-                Debug.LogWarning($"Encountered in error when checking to see if Yarn Project Importer could generate a strings table: {e}", this);
-#else
-                // Ignore the 'variable e is unused' warning
-                var _ = e;
-#endif
-                canGenerateStringsTable = false;
-            }
-
-            if (showInternalLocalizationGUI)
-            {
-                // The following controls only do something useful if all of the
-                // lines in the project have tags, which means the project can
-                // generate a string table.
-                using (new EditorGUI.DisabledScope(canGenerateStringsTable == false))
+                if (EditorUtility.DisplayDialog("Unapplied Changes", "The currently selected Yarn Project has unapplied changes. Do you want to apply them or revert?", "Apply", "Revert"))
                 {
-#if USE_ADDRESSABLES
-
-                    // If the addressable assets package is available, show a
-                    // checkbox for using it.
-                    var hasAnySourceAssetFolders = yarnProjectImporter.languagesToSourceAssets.Any(l => l.assetsFolder != null);
-                    if (hasAnySourceAssetFolders == false)
-                    {
-                        // Disable this checkbox if there are no assets
-                        // available.
-                        using (new EditorGUI.DisabledScope(true))
-                        {
-                            EditorGUILayout.Toggle(useAddressableAssetsProperty.displayName, false);
-                        }
-                    }
-                    else
-                    {
-                        EditorGUILayout.PropertyField(useAddressableAssetsProperty);
-
-                        // Show a warning if we've requested addressables but
-                        // haven't set it up.
-                        if (useAddressableAssetsProperty.boolValue && AddressableAssetSettingsDefaultObject.SettingsExists == false)
-                        {
-                            EditorGUILayout.HelpBox("Please set up Addressable Assets in this project.", MessageType.Warning);
-                        }
-                    }
-
-                    // Add a button for updating asset addresses, if any asset
-                    // source folders exist
-                    if (useAddressableAssetsProperty.boolValue && AddressableAssetSettingsDefaultObject.SettingsExists)
-                    {
-                        using (new EditorGUI.DisabledScope(hasAnySourceAssetFolders == false))
-                        {
-                            if (GUILayout.Button($"Update Asset Addresses"))
-                            {
-                                YarnProjectUtility.UpdateAssetAddresses(yarnProjectImporter);
-                            }
-                        }
-                    }
+#if UNITY_2022_2_OR_NEWER
+                    this.SaveChanges();
+#else
+                    this.ApplyAndImport();
 #endif
                 }
             }
-
-            EditorGUILayout.Space();
-
-            EditorGUILayout.LabelField("Commands and Functions", EditorStyles.boldLabel);
-
-            var searchAllAssembliesLabel = new GUIContent("Search All Assemblies", "Search all assembly definitions for commands and functions, as well as code that's not in a folder with an assembly definition");
-            EditorGUILayout.PropertyField(searchAllAssembliesProperty, searchAllAssembliesLabel);
-
-            if (searchAllAssembliesProperty.boolValue == false)
-            {
-                EditorGUI.indentLevel += 1;
-                EditorGUILayout.PropertyField(assembliesToSearchProperty);
-                EditorGUI.indentLevel -= 1;
-            }
-
-            EditorGUILayout.PropertyField(predeterminedFunctionsProperty, true);
-
-            if (showInternalLocalizationGUI)
-            {
-
-                using (new EditorGUI.DisabledGroupScope(canGenerateStringsTable == false))
-                {
-                    if (GUILayout.Button("Export Strings and Metadata as CSV"))
-                    {
-                        var currentPath = AssetDatabase.GetAssetPath(serializedObject.targetObject);
-                        var currentFileName = Path.GetFileNameWithoutExtension(currentPath);
-                        var currentDirectory = Path.GetDirectoryName(currentPath);
-
-                        var destinationPath = EditorUtility.SaveFilePanel("Export Strings CSV", currentDirectory, $"{currentFileName}.csv", "csv");
-
-                        if (string.IsNullOrEmpty(destinationPath) == false)
-                        {
-                            // Generate the file on disk
-                            YarnProjectUtility.WriteStringsFile(destinationPath, yarnProjectImporter);
-
-                            // Also generate the metadata file.
-                            var destinationDirectory = Path.GetDirectoryName(destinationPath);
-                            var destinationFileName = Path.GetFileNameWithoutExtension(destinationPath);
-
-                            var metadataDestinationPath = Path.Combine(destinationDirectory, $"{destinationFileName}-metadata.csv");
-                            YarnProjectUtility.WriteMetadataFile(metadataDestinationPath, yarnProjectImporter);
-
-                            // destinationPath may have been inside our Assets
-                            // directory, so refresh the asset database
-                            AssetDatabase.Refresh();
-                        }
-                    }
-                    if (yarnProjectImporter.languagesToSourceAssets.Count > 0)
-                    {
-                        if (GUILayout.Button("Update Existing Strings Files"))
-                        {
-                            YarnProjectUtility.UpdateLocalizationCSVs(yarnProjectImporter);
-                        }
-                    }
-                }
-            }
-
-            // Does this project's source scripts list contain any actual
-            // assets? (It can have a count of >0 and still have no assets
-            // when, for example, you've just clicked the + button but
-            // haven't dragged an asset in yet.)
-            var hasAnyTextAssets = yarnProjectImporter.sourceScripts.Where(s => s != null).Count() > 0;
-
-            // Disable this button if 1. all lines already have tags or 2.
-            // no actual source files exist
-            using (new EditorGUI.DisabledScope(canGenerateStringsTable == true || hasAnyTextAssets == false))
-            {
-                if (GUILayout.Button("Add Line Tags to Scripts"))
-                {
-                    YarnProjectUtility.AddLineTagsToFilesInYarnProject(yarnProjectImporter);
-                }
-            }
-
-            var hadChanges = serializedObject.ApplyModifiedProperties();
-
-#if UNITY_2018
-            // Unity 2018's ApplyRevertGUI is buggy, and doesn't
-            // automatically detect changes to the importer's
-            // serializedObject. This means that we'd need to track the
-            // state of the importer, and don't have a way to present a
-            // Revert button. 
-            //
-            // Rather than offer a broken experience, on Unity 2018 we
-            // immediately reimport the changes. This is slow (we're
-            // serializing and writing the asset to disk on every property
-            // change!) but ensures that the writes are done.
-            if (hadChanges)
-            {
-                // Manually perform the same tasks as the 'Apply' button
-                // would
-                ApplyAndImport();
-            }
-#endif
-
-#if UNITY_2019_1_OR_NEWER
-            // On Unity 2019 and newer, we can use an ApplyRevertGUI that
-            // works identically to the built-in importer inspectors.
-            ApplyRevertGUI();
-#endif
         }
-
-
 
         protected override void Apply()
         {
             base.Apply();
 
-            // Get all declarations that came from this program
-            var thisProgramDeclarations = new List<Yarn.Compiler.Declaration>();
 
-            for (int i = 0; i < serializedDeclarationsProperty.arraySize; i++)
+            if (!(this.target is YarnProjectImporter importer))
             {
-                var decl = serializedDeclarationsProperty.GetArrayElementAtIndex(i);
-                if (decl.FindPropertyRelative("sourceYarnAsset").objectReferenceValue != null)
+                throw new InvalidOperationException($"Internal error: importer for {this.target} is not a {nameof(YarnProjectImporter)}!");
+            }
+
+            var data = importer.GetProject()
+                ?? throw new InvalidOperationException($"Failed to open project at {importer.assetPath}. Is it damaged?");
+
+            var importerFolder = Path.GetDirectoryName(importer.assetPath);
+
+            var removedLocalisations = data.Localisation.Keys.Except(localizationEntryFields.Select(f => f.value.languageID)).ToList();
+
+            foreach (var removedLocalisation in removedLocalisations)
+            {
+                data.Localisation.Remove(removedLocalisation);
+            }
+
+            data.SourceFilePatterns = this.sourceEntryFields.Select(f => f.value);
+
+            foreach (var locField in localizationEntryFields)
+            {
+
+                // Does this localisation field represent a localisation that
+                // used to be the base localisation, but is now no longer? If it
+                // is, even if it's unmodified, we need to make sure we add it
+                // to the project data.
+                bool wasPreviouslyBaseLocalisation =
+                    locField.value.languageID == data.BaseLanguage
+                    && BaseLanguageNameModified;
+
+                // Skip any records that we don't need to touch
+                if (locField.IsModified == false && !wasPreviouslyBaseLocalisation)
                 {
                     continue;
                 }
 
-                var name = decl.FindPropertyRelative("name").stringValue;
+                var locInfo = new Project.LocalizationInfo();
 
-                SerializedProperty typeProperty = decl.FindPropertyRelative("typeName");
-
-                Yarn.IType type = YarnProjectImporter.SerializedDeclaration.BuiltInTypesList.FirstOrDefault(t => t.Name == typeProperty.stringValue);
-
-                var description = decl.FindPropertyRelative("description").stringValue;
-
-                System.IConvertible defaultValue;
-
-                if (type == Yarn.BuiltinTypes.Number) {
-                    defaultValue = decl.FindPropertyRelative("defaultValueNumber").floatValue;
-                } else if (type == Yarn.BuiltinTypes.String) {
-                    defaultValue = decl.FindPropertyRelative("defaultValueString").stringValue;
-                } else if (type == Yarn.BuiltinTypes.Boolean) {
-                    defaultValue = decl.FindPropertyRelative("defaultValueBool").boolValue;
-                } else {
-                    throw new System.ArgumentOutOfRangeException($"Invalid declaration type {type.Name}");
+                if (locField.value.isExternal && locField.value.externalLocalization != null && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(locField.value.externalLocalization, out var guid, out long _))
+                {
+                    var path = AssetDatabase.GetAssetPath(locField.value.externalLocalization);
+                    locInfo.Strings = "unity:" + guid;
+                    locInfo.Assets = "unity:" + guid;
                 }
-                
-                var declaration = Declaration.CreateVariable(name, type, defaultValue, description);
+                else
+                {
+                    var stringFile = locField.value.stringsFile;
+                    var assetFolder = locField.value.assetsFolder;
 
-                thisProgramDeclarations.Add(declaration);
+                    if (stringFile != null)
+                    {
+                        string stringFilePath = AssetDatabase.GetAssetPath(stringFile);
+                        locInfo.Strings = Path.GetRelativePath(importerFolder, stringFilePath);
+                    }
+                    if (assetFolder != null)
+                    {
+                        string assetFolderPath = AssetDatabase.GetAssetPath(assetFolder);
+                        locInfo.Assets = Path.GetRelativePath(importerFolder, assetFolderPath);
+                    }
+                }
+
+                data.Localisation[locField.value.languageID] = locInfo;
+                locField.ClearModified();
             }
 
-            var output = Yarn.Compiler.Utility.GenerateYarnFileWithDeclarations(thisProgramDeclarations, "Program");
+            data.BaseLanguage = this.baseLanguage ?? "unknown";
 
-            var importer = target as YarnProjectImporter;
-            File.WriteAllText(importer.assetPath, output, System.Text.Encoding.UTF8);
-            AssetDatabase.ImportAsset(importer.assetPath);
+            if (data.Localisation.TryGetValue(data.BaseLanguage, out var baseLanguageInfo))
+            {
+                if (string.IsNullOrEmpty(baseLanguageInfo.Strings)
+                    && string.IsNullOrEmpty(baseLanguageInfo.Assets))
+                {
+                    // We have a localisation info entry, but it doesn't provide
+                    // any useful information (the strings field is unused, and
+                    // the assets field defaults to empty anyway). Trim it from
+                    // the data.
+                    data.Localisation.Remove(data.BaseLanguage);
+                }
+            }
+
+            foreach (var sourceField in this.sourceEntryFields)
+            {
+                sourceField.ClearModified();
+            }
+
+            BaseLanguageNameModified = false;
+            SourceFilesAddedOrRemoved = false;
+            LocalisationsAddedOrRemoved = false;
+            StringTableModified = false;
+
+            data.SaveToFile(importer.assetPath);
+
+            if (localizationEntryFields.Any(f => f.value.languageID == this.baseLanguage) == false)
+            {
+                var newBaseLanguageField = CreateLocalisationEntryElement(new ProjectImportData.LocalizationEntry
+                {
+                    assetsFolder = null,
+                    stringsFile = null,
+                    languageID = baseLanguage ?? "unknown",
+                }, baseLanguage ?? "unknown");
+                localizationEntryFields.Add(newBaseLanguageField);
+                localisationFieldsContainer?.Add(newBaseLanguageField);
+            }
         }
-    }
 
-    /// <summary>
-    /// An attribute that causes this property to be drawn as a read-only
-    /// label if a second property is equal to a specific static field on a
-    /// specific class.
-    /// </summary>
-    /// <remarks>
-    /// This attribute is used in order to make the 'stringsFile' field on
-    /// YarnProjectImporter.LanguageToSourceAsset appear as a read-only
-    /// label when its 'languageID' is equal to the default language of the
-    /// YarnProjectImporter currently being inspected.
-    ///
-    /// Yes, this is a really convoluted approach, but this is the best I
-    /// could come up with considering I didn't want to re-implement
-    /// drawing the entire list, and I can't pass contextual information to
-    /// a property.
-    /// </remarks>
-    internal class HideWhenPropertyValueEqualsContextAttribute : PropertyAttribute
-    {
-        /// <summary>
-        /// The class that contains a static field with the name given in
-        /// <see cref="FieldNameInOtherClass"/>.
-        /// </summary>
-        public System.Type OtherClassType;
-
-        /// <summary>
-        /// The name of the static field found in <see
-        /// cref="OtherClassType"/>. This field must be of type <see
-        /// cref="SerializedProperty"/>.
-        /// </summary>
-        /// <remarks>
-        /// You are strongly encouraged to use <code>nameof</code> to refer
-        /// to this member.
-        /// </remarks>
-        public string FieldNameInOtherClass;
-
-        /// <summary>
-        /// The name of the field whose value should be checked against.
-        /// This field must be a sibling of the field this attribute is
-        /// applied to.
-        /// </summary>
-        public string SiblingFieldName;
-
-        /// <summary>
-        /// The label to show for this field in the Inspector when the
-        /// field <see cref="SiblingFieldName"/> has a string value equal
-        /// to the <see cref="SerializedProperty"/> field in <see
-        /// cref="OtherClassType"/>.
-        /// </summary>
-        public string DisplayStringWhenEmpty;
-
-        public HideWhenPropertyValueEqualsContextAttribute(string siblingFieldName, System.Type classType, string fieldNameInOtherClass, string displayStringWhenEmpty)
+        public override void DiscardChanges()
         {
-            OtherClassType = classType;
-            FieldNameInOtherClass = fieldNameInOtherClass;
-            SiblingFieldName = siblingFieldName;
-            DisplayStringWhenEmpty = displayStringWhenEmpty;
+            localizationEntryFields.Clear();
+            sourceEntryFields.Clear();
+            LocalisationsAddedOrRemoved = false;
+            BaseLanguageNameModified = false;
+            SourceFilesAddedOrRemoved = false;
+
+            base.DiscardChanges();
+
+            var inspectorRoot = uiRoot?.parent;
+            uiRoot?.RemoveFromHierarchy();
+
+            inspectorRoot?.Add(CreateInspectorGUI());
         }
-    }
 
-    /// <summary>
-    /// The custom editor for drawing properties that have the
-    /// HideWhenPropertyValueEqualsContextAttribute applied to them.
-    /// </summary>
-    [CustomPropertyDrawer(typeof(HideWhenPropertyValueEqualsContextAttribute))]
-    internal class HideWhenValueEqualsContextAttributeEditor : PropertyDrawer
-    {
-        /// <summary>
-        /// Called by Unity to draw the GUI for properties that this editor
-        /// applies to.
-        /// </summary>
-        /// <param name="position">The rectangle to draw content
-        /// in.</param>
-        /// <param name="property">The property to draw.</param>
-        /// <param name="label">The label to draw for this
-        /// property.</param>
-        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
+        public override VisualElement CreateInspectorGUI()
         {
-            // Get the HideWhenPropertyValueEqualsContextAttribute that
-            // caused this drawer to be invoked.
-            var attribute = this.attribute as HideWhenPropertyValueEqualsContextAttribute;
-
-            // Get the data out of the attribute.
-            System.Type classType = attribute.OtherClassType;
-            string fieldName = attribute.FieldNameInOtherClass;
-            string displayStringWhenEmpty = attribute.DisplayStringWhenEmpty;
-
-            // Get the static field that the attribute wants to access.
-            System.Reflection.FieldInfo field = classType.GetField(fieldName, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-
-            // Get the internal method EditorGUI.DefaultPropertyField,
-            // which we'll call when we need to draw the original property
-            // UI.
-            MethodInfo defaultDraw = typeof(EditorGUI)
-                .GetMethod("DefaultPropertyField", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-
-            // Is the static field a serialized property?
-            if (field.FieldType.IsAssignableFrom(typeof(SerializedProperty)) == false)
+            if (!(target is YarnProjectImporter yarnProjectImporter))
             {
-                // The field we were aimed at is not a serialized property.
-                // Early out.
-                defaultDraw.Invoke(null, new object[3] { position, property, label });
-                return;
+                throw new InvalidOperationException($"Internal error: importer for {this.target} is not a {nameof(YarnProjectImporter)}!");
             }
 
-            // Get the context property from the class's static field.
-            SerializedProperty contextProperty = field.GetValue(null) as SerializedProperty;
+            var importData = yarnProjectImporter.ImportData;
 
-            // Next, get the property we're comparing to. This is required
-            // to be a sibling property of the one that had this attribute.
+            var ui = new VisualElement();
+            uiRoot = ui;
 
-            // We'll do this by taking the path to this property, removing
-            // the last element, and appending the target property name.
-            // We'll then use FindProperty to locate it.
-            var targetPropertyPath = string.Join(".", property.propertyPath.Split('.').Reverse().Skip(1).Reverse().Append(attribute.SiblingFieldName));
+            ui.styleSheets.Add(yarnProjectStyleSheet);
 
-            var targetProperty = property.serializedObject.FindProperty(targetPropertyPath);
+            // nice header bit with logo and links
+            var yarnspinnerHeader = new IMGUIContainer(DialogueRunnerEditor.DrawYarnSpinnerHeader);
+            ui.Add(yarnspinnerHeader);
 
-            if (targetProperty == null)
+            // if the import data is null it means import has crashed
+            // we need to let the user know and perhaps ask them to file an issue
+            if (importData == null)
             {
-                // We couldn't find it. Log a warning, draw the original
-                // UI, and return.
-                Debug.LogWarning($"Property not found at path {targetPropertyPath}");
-                defaultDraw.Invoke(null, new object[3] { position, property, label });
+                ui.Add(CreateCriticalErrorUI());
+                return ui;
             }
 
-            // Ensure that they're both strings.
-            if (targetProperty.propertyType != SerializedPropertyType.String || contextProperty.propertyType != SerializedPropertyType.String)
+            // next we need to handle the two edge cases
+            // either the importData is for the older format
+            // or it's completely unknown (most likely a error)
+            // in both cases we show the respective custom UI and return
+            switch (importData.ImportStatus)
             {
-                // They're not both strings. Draw as usual.
-                //
-                // (This restriction exists because, weirdly,
-                // SerializedProperty.DataEquals() on two properties that
-                // contained the strings "en-AU" and "en-US" was returning
-                // true. Restricting it to strings and doing a string
-                // comparison fixed this.)
-                defaultDraw.Invoke(null, new object[3] { position, property, label });
+                case ProjectImportData.ImportStatusCode.NeedsUpgradeFromV1:
+                    {
+                        ui.Add(CreateUpgradeUI(yarnProjectImporter));
+                        return ui;
+                    }
+                case ProjectImportData.ImportStatusCode.Unknown:
+                    {
+                        ui.Add(CreateUnknownErrorUI());
+                        return ui;
+                    }
             }
 
-            // Finally, the moment of truth: compare the two strings.
-            if (contextProperty.stringValue.Equals(targetProperty.stringValue, System.StringComparison.InvariantCulture))
+            var importDataSO = new SerializedObject(importData);
+            var diagnosticsProperty = importDataSO.FindProperty(nameof(ProjectImportData.diagnostics));
+
+            var errorsContainer = new VisualElement();
+            errorsContainer.name = "errors";
+
+            var sourceFilesContainer = new VisualElement();
+
+            var localisationControls = new VisualElement();
+
+            var yarnInternalControls = new VisualElement();
+
+            var unityControls = new VisualElement();
+
+            var useAddressableAssetsField = new PropertyField(useAddressableAssetsProperty);
+            useAddressableAssetsField.BindProperty(useAddressableAssetsProperty);
+
+#if USE_UNITY_LOCALIZATION
+            var useUnityLocalisationSystemField = new PropertyField(useUnityLocalisationSystemProperty);
+            useUnityLocalisationSystemField.BindProperty(useUnityLocalisationSystemProperty);
+
+            // References to string table collections are stored as GUIDs,
+            // because ScriptedImporters can't refer to ScriptableObjects
+            // directly without causing drama. To preserve a good user
+            // experience, we'll add and manage an ObjectField directly.
+            var unityLocalisationTableCollectionField = new ObjectField("String Table Collection");
+            unityLocalisationTableCollectionField.objectType = typeof(StringTableCollection);
+            unityLocalisationTableCollectionField.SetValueWithoutNotify(yarnProjectImporter.UnityLocalisationStringTableCollection);
+#endif
+
+            localisationFieldsContainer = new VisualElement();
+            sourceFileEntriesContainer = new VisualElement();
+            variableStorageSettingsContainer = new VisualElement();
+
+            localisationControls.style.marginBottom = 8;
+
+            if (importData.diagnostics.Any())
             {
-                // The data matches. We don't want to show this property.
-                // Show the label instead.
-                EditorGUI.LabelField(position, label, new GUIContent(displayStringWhenEmpty));
+                var header = new Label();
+                header.text = "Errors";
+                header.style.unityFontStyleAndWeight = FontStyle.Bold;
+
+                errorsContainer.Add(header);
+
+                foreach (var error in importData.diagnostics)
+                {
+                    var errorContainer = new VisualElement();
+                    errorContainer.style.marginLeft = 15;
+
+                    var objectField = new ObjectField();
+                    objectField.value = error.yarnFile;
+                    objectField.objectType = typeof(TextAsset);
+
+                    var messagesField = new IMGUIContainer(() =>
+                    {
+                        foreach (var message in error.errorMessages)
+                        {
+                            EditorGUILayout.HelpBox(message, MessageType.Error);
+                        }
+                    });
+                    messagesField.style.marginLeft = 30;
+
+                    // if an error isn't able to be linked to a yarn file specifically
+                    // such as an error in the library defining an invalid external function
+                    // we don't want to show an empty text asset
+                    if (error.yarnFile != null)
+                    {
+                        errorContainer.Add(objectField);
+                    }
+                    errorContainer.Add(messagesField);
+
+                    errorsContainer.Add(errorContainer);
+                }
+
+                errorsContainer.style.marginBottom = 15;
+
+                ui.Add(errorsContainer);
+            }
+
+            sourceFileEntriesContainer.style.marginLeft = 8;
+
+            ui.Add(sourceFilesContainer);
+            var sourceFilesHeader = new Label();
+            sourceFilesHeader.text = "Source Yarn Scripts";
+            sourceFilesHeader.style.unityFontStyleAndWeight = FontStyle.Bold;
+            sourceFilesContainer.Add(sourceFilesHeader);
+            sourceFilesContainer.Add(sourceFileEntriesContainer);
+
+            foreach (var path in importData.sourceFilePatterns)
+            {
+                var locElement = CreateSourceFileEntryElement(path);
+                sourceFileEntriesContainer.Add(locElement);
+                sourceEntryFields.Add(locElement);
+            }
+
+            var addSourceFileButton = new Button();
+            addSourceFileButton.text = "Add";
+            sourceFilesContainer.Add(addSourceFileButton);
+            addSourceFileButton.style.marginLeft = 8;
+            addSourceFileButton.clicked += () =>
+            {
+                var loc = CreateSourceFileEntryElement("**/*.yarn");
+                sourceEntryFields.Add(loc);
+                sourceFileEntriesContainer.Add(loc);
+                SourceFilesAddedOrRemoved = true;
+            };
+
+            var localisationHeader = new Label();
+
+            localisationHeader.text = "Localisation";
+            localisationHeader.style.unityFontStyleAndWeight = FontStyle.Bold;
+            localisationHeader.style.marginTop = 8;
+
+            localisationControls.Add(localisationHeader);
+
+            var languagePopup = new LanguageField("Base Language");
+            var generateStringsFileButton = new Button();
+            var addStringTagsButton = new Button();
+            var updateExistingStringsFilesButton = new Button();
+
+            baseLanguage = importData.baseLanguageName;
+
+            languagePopup.SetValueWithoutNotify(baseLanguage ?? "unknown");
+            languagePopup.RegisterValueChangedCallback(evt =>
+            {
+                baseLanguage = evt.newValue;
+                foreach (var loc in localizationEntryFields)
+                {
+                    loc.ProjectBaseLanguage = baseLanguage;
+                }
+                BaseLanguageNameModified = true;
+            });
+
+            localisationControls.Add(languagePopup);
+
+#if USE_ADDRESSABLES
+            yarnInternalControls.Add(useAddressableAssetsField);
+#endif
+
+            yarnInternalControls.Add(localisationFieldsContainer);
+
+            foreach (var localisation in importData.localizations)
+            {
+                var locElement = CreateLocalisationEntryElement(localisation, baseLanguage ?? "unknown");
+                localisationFieldsContainer.Add(locElement);
+                localizationEntryFields.Add(locElement);
+            }
+
+            var addLocalisationButton = new Button();
+            addLocalisationButton.text = "Add Localisation";
+            addLocalisationButton.clicked += () =>
+            {
+                var loc = CreateLocalisationEntryElement(new ProjectImportData.LocalizationEntry()
+                {
+                    languageID = importData.baseLanguageName ?? "unknown",
+                }, baseLanguage ?? "unknown");
+                localizationEntryFields.Add(loc);
+                localisationFieldsContainer.Add(loc);
+                LocalisationsAddedOrRemoved = true;
+
+            };
+            yarnInternalControls.Add(addLocalisationButton);
+
+
+#if USE_UNITY_LOCALIZATION
+            localisationControls.Add(useUnityLocalisationSystemField);
+
+            unityControls.Add(unityLocalisationTableCollectionField);
+
+            var emptyTableCollectionWarning = new IMGUIContainer(() =>
+            {
+                EditorGUILayout.HelpBox("A string table collection is required.", MessageType.Warning);
+            });
+
+            unityControls.Add(emptyTableCollectionWarning);
+
+            void UpdateLocalizationVisibility()
+            {
+                SetElementVisible(unityControls, useUnityLocalisationSystemProperty?.boolValue ?? false);
+                SetElementVisible(yarnInternalControls, !useUnityLocalisationSystemProperty?.boolValue ?? false);
+            }
+
+            void UpdateUnityTableCollectionEmptyWarningVisibility()
+            {
+                SetElementVisible(emptyTableCollectionWarning, string.IsNullOrEmpty(unityLocalisationTableCollectionGUIDProperty?.stringValue));
+            }
+
+            UpdateLocalizationVisibility();
+            UpdateUnityTableCollectionEmptyWarningVisibility();
+
+            useUnityLocalisationSystemField.RegisterCallback<ChangeEvent<bool>>(evt =>
+            {
+                UpdateLocalizationVisibility();
+            });
+
+
+            unityLocalisationTableCollectionField.RegisterValueChangedCallback(evt =>
+            {
+                // When the localisation table changes, get the GUID for it and
+                // store it in the property.
+
+                if (unityLocalisationTableCollectionGUIDProperty == null)
+                {
+                    throw new InvalidOperationException($"{nameof(unityLocalisationTableCollectionGUIDProperty)} is null");
+                }
+
+                if (evt.newValue != null && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(evt.newValue, out string guid, out long _))
+                {
+                    unityLocalisationTableCollectionGUIDProperty.stringValue = guid;
+                    unityLocalisationTableCollectionGUIDProperty.serializedObject.ApplyModifiedProperties();
+                }
+                else
+                {
+                    // The object is null, or a GUID for it can't be found.
+                    unityLocalisationTableCollectionGUIDProperty.stringValue = string.Empty;
+                    unityLocalisationTableCollectionGUIDProperty.serializedObject.ApplyModifiedProperties();
+                }
+
+                // Flag that we've changed our importer's settings.
+                StringTableModified = true;
+
+                UpdateUnityTableCollectionEmptyWarningVisibility();
+            });
+#endif
+
+            var cantGenerateUnityStringTableMessage = new IMGUIContainer(() =>
+            {
+                EditorGUILayout.HelpBox($"All lines must have a line ID tag in order to create a string table. Click '{AddStringTagsButtonLabel}' to fix this problem.", MessageType.Warning);
+            });
+
+            addStringTagsButton.text = AddStringTagsButtonLabel;
+            addStringTagsButton.clicked += () =>
+            {
+                YarnProjectUtility.AddLineTagsToFilesInYarnProject(yarnProjectImporter);
+                UpdateTaggingButtonsEnabled();
+            };
+
+            generateStringsFileButton.text = GenerateStringsFileButtonLabel;
+
+            generateStringsFileButton.clicked += () => ExportStringsData(yarnProjectImporter);
+
+            updateExistingStringsFilesButton.text = UpdateExistingStringsFilesButtonLabel;
+            updateExistingStringsFilesButton.clicked += () =>
+            {
+                YarnProjectUtility.UpdateLocalizationCSVs(yarnProjectImporter);
+            };
+            yarnInternalControls.Add(updateExistingStringsFilesButton);
+
+            localisationControls.Add(yarnInternalControls);
+            localisationControls.Add(unityControls);
+
+            ui.Add(localisationControls);
+
+            ui.Add(cantGenerateUnityStringTableMessage);
+
+            ui.Add(addStringTagsButton);
+            ui.Add(generateStringsFileButton);
+
+            var generateVariablesSourceFileField = new PropertyField(generateVariablesSourceFileProperty);
+            var variablesClassNameField = new PropertyField(variablesClassNameProperty);
+            var variablesClassNamespaceField = new PropertyField(variablesClassNamespaceProperty);
+
+            generateVariablesSourceFileField.Bind(serializedObject);
+            variablesClassNameField.Bind(serializedObject);
+            variablesClassNamespaceField.Bind(serializedObject);
+
+
+            // Find all loaded assemblies that are not YarnSpinner.dll. Find all
+            // types that implement IVariableStorage, are not abstract, and are
+            // not generated code. Get the full names of the result.
+            var variableStorageClasses = AppDomain.CurrentDomain
+                .GetAssemblies()
+                .Where(a => a != typeof(Yarn.Dialogue).Assembly)
+                .SelectMany(a => a.GetTypes())
+                .Where(t => t.GetInterfaces().Any(i => i == typeof(IVariableStorage)))
+                .Where(t => t.IsAbstract == false)
+                .Where(t => !t.CustomAttributes.Any(a => a.AttributeType == typeof(System.CodeDom.Compiler.GeneratedCodeAttribute)))
+                .Select(t => t.FullName)
+                .ToList();
+
+            var variablesClassParentDropdownField = new DropdownField(
+                "Variables Parent Class",
+                variableStorageClasses,
+                variablesClassParentProperty?.stringValue ?? string.Empty
+                );
+
+            variablesClassParentDropdownField.RegisterValueChangedCallback(v =>
+            {
+                if (variablesClassParentProperty != null)
+                {
+                    variablesClassParentProperty.stringValue = v.newValue;
+                }
+                serializedObject.ApplyModifiedProperties();
+            });
+
+            void UpdateVariableSettingsVisibility()
+            {
+                foreach (var field in new VisualElement[] { variablesClassNameField, variablesClassNamespaceField, variablesClassParentDropdownField })
+                {
+                    SetElementVisible(field, generateVariablesSourceFileProperty?.boolValue ?? false);
+                }
+            }
+            UpdateVariableSettingsVisibility();
+            generateVariablesSourceFileField.RegisterValueChangeCallback(e => UpdateVariableSettingsVisibility());
+
+            variableStorageSettingsContainer.Add(generateVariablesSourceFileField);
+            variableStorageSettingsContainer.Add(variablesClassNameField);
+            variableStorageSettingsContainer.Add(variablesClassNamespaceField);
+            variableStorageSettingsContainer.Add(variablesClassParentDropdownField);
+
+            ui.Add(variableStorageSettingsContainer);
+
+
+            ui.Add(new IMGUIContainer(ApplyRevertGUI));
+
+            UpdateTaggingButtonsEnabled();
+
+            return ui;
+
+            void UpdateTaggingButtonsEnabled()
+            {
+                addStringTagsButton.SetEnabled(yarnProjectImporter.CanGenerateStringsTable == false && importData.yarnFiles.Any());
+                generateStringsFileButton.SetEnabled(yarnProjectImporter.CanGenerateStringsTable);
+
+                bool isUnityLocalisationAvailable;
+#if USE_UNITY_LOCALIZATION
+                isUnityLocalisationAvailable = true;
+#else
+                isUnityLocalisationAvailable = false;
+#endif
+
+                cantGenerateUnityStringTableMessage.style.display = (isUnityLocalisationAvailable && yarnProjectImporter.HasErrors == false && yarnProjectImporter.CanGenerateStringsTable == false) ? DisplayStyle.Flex : DisplayStyle.None;
+            }
+        }
+
+        private LocalizationEntryElement CreateLocalisationEntryElement(ProjectImportData.LocalizationEntry localisation, string baseLanguage)
+        {
+            if (localizationUIAsset == null)
+            {
+                throw new InvalidOperationException($"Can't create {nameof(LocalizationEntryElement)}: {nameof(localizationUIAsset)} is null");
+            }
+
+            var locElement = new LocalizationEntryElement(localizationUIAsset, localisation, baseLanguage);
+            locElement.OnDelete += () =>
+            {
+                locElement.RemoveFromHierarchy();
+                localizationEntryFields.Remove(locElement);
+                LocalisationsAddedOrRemoved = true;
+            };
+            return locElement;
+        }
+
+        private SourceFileEntryElement CreateSourceFileEntryElement(string path)
+        {
+            if (sourceFileUIAsset == null)
+            {
+                throw new InvalidOperationException($"Can't create {nameof(SourceFileEntryElement)}: {nameof(sourceFileUIAsset)} is null");
+            }
+
+            if (!(this.target is YarnProjectImporter importer))
+            {
+                throw new InvalidOperationException($"Internal error: importer for {this.target} is not a {nameof(YarnProjectImporter)}!");
+            }
+
+            var sourceElement = new SourceFileEntryElement(sourceFileUIAsset, path, importer);
+            sourceElement.OnDelete += () =>
+            {
+                sourceElement.RemoveFromHierarchy();
+                sourceEntryFields.Remove(sourceElement);
+                SourceFilesAddedOrRemoved = true;
+            };
+            return sourceElement;
+        }
+
+
+        private void ExportStringsData(YarnProjectImporter yarnProjectImporter)
+        {
+            var currentPath = AssetDatabase.GetAssetPath(yarnProjectImporter);
+            var currentFileName = Path.GetFileNameWithoutExtension(currentPath);
+            var currentDirectory = Path.GetDirectoryName(currentPath);
+
+            var destinationPath = EditorUtility.SaveFilePanel("Export Strings CSV", currentDirectory, $"{currentFileName}.csv", "csv");
+
+            if (string.IsNullOrEmpty(destinationPath) == false)
+            {
+                // Generate the file on disk
+                YarnProjectUtility.WriteStringsFile(destinationPath, yarnProjectImporter);
+
+                // Also generate the metadata file.
+                var destinationDirectory = Path.GetDirectoryName(destinationPath);
+                var destinationFileName = Path.GetFileNameWithoutExtension(destinationPath);
+
+                var metadataDestinationPath = Path.Combine(destinationDirectory, $"{destinationFileName}-metadata.csv");
+                YarnProjectUtility.WriteMetadataFile(metadataDestinationPath, yarnProjectImporter);
+
+                // destinationPath may have been inside our Assets
+                // directory, so refresh the asset database
+                AssetDatabase.Refresh();
+
+            }
+        }
+
+        private static void SetElementVisible(VisualElement e, bool visible)
+        {
+            if (visible)
+            {
+                e.style.display = DisplayStyle.Flex;
             }
             else
             {
-                // The data doesn't match. Draw as usual.
-                defaultDraw.Invoke(null, new object[3] { position, property, label });
+                e.style.display = DisplayStyle.None;
             }
         }
-    }
 
+        public override bool HasModified()
+        {
+            return base.HasModified() || AnyModifications;
+        }
+
+        private VisualElement CreateUpgradeUI(YarnProjectImporter importer)
+        {
+            var ui = new VisualElement();
+
+            var box = new VisualElement();
+            box.AddToClassList("help-box");
+
+            Label header = new Label("This project needs to be upgraded.");
+            header.style.unityFontStyleAndWeight = FontStyle.Bold;
+            box.Add(header);
+            box.Add(new Label("After upgrading, you will need to update your localisations, and ensure that all of the Yarn scripts for this project are in the same folder as the project."));
+            box.Add(new Label("Your Yarn scripts will not be modified."));
+
+            var learnMoreLink = new Label("Learn more...");
+            learnMoreLink.RegisterCallback<MouseDownEvent>(evt =>
+            {
+                Application.OpenURL(ProjectUpgradeHelpURL);
+            });
+            learnMoreLink.AddToClassList("link");
+            box.Add(learnMoreLink);
+
+            var upgradeButton = new Button(() =>
+            {
+                YarnProjectUtility.UpgradeYarnProject(importer);
+
+                // Reload the entire inspector - we will have changed the
+                // project significantly
+                ActiveEditorTracker.sharedTracker.ForceRebuild();
+            });
+            upgradeButton.text = "Upgrade Yarn Project";
+            box.Add(upgradeButton);
+
+            ui.Add(box);
+
+            ui.Add(new IMGUIContainer(ApplyRevertGUI));
+
+            return ui;
+        }
+
+        private VisualElement CreateErrorUI(string headerText, string[] labels, string linkLabel, string link)
+        {
+            var ui = new VisualElement();
+            var box = new VisualElement();
+            box.AddToClassList("help-box");
+
+            Label header = new Label(headerText);
+            header.style.unityFontStyleAndWeight = FontStyle.Bold;
+            box.Add(header);
+
+            foreach (var label in labels)
+            {
+                box.Add(new Label(label));
+            }
+
+            var learnMoreLink = new Label(linkLabel);
+            learnMoreLink.RegisterCallback<MouseDownEvent>(evt =>
+            {
+                Application.OpenURL(link);
+            });
+            learnMoreLink.AddToClassList("link");
+            box.Add(learnMoreLink);
+
+            ui.Add(box);
+
+            ui.Add(new IMGUIContainer(ApplyRevertGUI));
+
+            return ui;
+        }
+
+        private VisualElement CreateCriticalErrorUI()
+        {
+            string[] labels = {
+                "This is likely due to a bug on our end, and not in your project.",
+                "Try recreating the project and see if this resolves the issue."
+            };
+
+            return CreateErrorUI("This project has failed to import due to an internal error.", labels, "If the issue persists, please open an issue.", CreateNewIssueURL);
+        }
+
+        private VisualElement CreateUnknownErrorUI()
+        {
+            string[] labels = {
+                "The type of this Yarn Project is unknown.",
+                "Try recreating the project and see if this resolves the issue."
+            };
+
+            return CreateErrorUI("This project has failed to import correctly.", labels, "If the issue persists, please open an issue.", CreateNewIssueURL);
+        }
+    }
 }
