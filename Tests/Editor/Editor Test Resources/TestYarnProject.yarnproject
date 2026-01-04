@@ -1,13 +1,3 @@
-{
-  "projectFileVersion": 3,
-  "sourceFiles": [
-    "./TestYarnScript.yarn"
-  ],
-  "excludeFiles": [],
-  "localisation": {
-    "de": {
-      "assets": "Voiceover/de"
-    }
-  },
-  "baseLanguage": "de"
-}
+﻿title: Program
+---
+===

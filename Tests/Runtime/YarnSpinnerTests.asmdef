@@ -5,10 +5,7 @@
         "YarnSpinner.Unity",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner",
-        "Unity.TextMeshPro",
-        "YarnSpinner.Unity.Editor",
-        "YarnSpinnerTests.Shared",
-        "UniTask"
+        "Unity.TextMeshPro"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -16,7 +13,8 @@
     "overrideReferences": true,
     "precompiledReferences": [
         "nunit.framework.dll",
-        "YarnSpinner.dll"
+        "YarnSpinner.dll",
+        "nunit.framework.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [
@@ -27,11 +25,6 @@
             "name": "com.unity.addressables",
             "expression": "1.0.0",
             "define": "USE_ADDRESSABLES"
-        },
-        {
-            "name": "com.cysharp.unitask",
-            "expression": "1.0.0",
-            "define": "USE_UNITASK"
         }
     ],
     "noEngineReferences": false

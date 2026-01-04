@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2025 Yarn Spinner Pty. Ltd.
+Copyright (c) 2020 Secret Lab Pty Ltd and Yarn Spinner Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

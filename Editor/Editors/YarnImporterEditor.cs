@@ -1,84 +1,59 @@
-/*
-Yarn Spinner is licensed to you under the terms found in the file LICENSE.md.
-*/
-
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using UnityEditor;
-using UnityEditor.AssetImporters;
 using UnityEngine;
+using UnityEditor;
+#if UNITY_2020_2_OR_NEWER
+using UnityEditor.AssetImporters;
+#else
+using UnityEditor.Experimental.AssetImporters;
+#endif
+using System.Linq;
+using System.IO;
+using System.Collections.Generic;
 using Yarn.Unity;
-
-#nullable enable
 
 namespace Yarn.Unity.Editor
 {
     [CustomEditor(typeof(YarnImporter))]
     public class YarnImporterEditor : ScriptedImporterEditor
     {
-        public IEnumerable<string> DestinationProjectErrors
-        {
-            get
-            {
-                if (assetTarget is not TextAsset textAsset)
-                {
-                    throw new System.InvalidOperationException($"Internal error: {nameof(assetTarget)} is not a {nameof(TextAsset)}");
-                }
+        private SerializedProperty isSuccessfullyCompiledProperty;
+        private SerializedProperty parseErrorMessagesProperty;
+        
+        public IEnumerable<string> DestinationProjectError => destinationYarnProjectImporter?.compileErrors ?? new List<string>();
 
-                return destinationYarnProjectImporters.SelectMany(i => i.GetErrorsForScript(textAsset)) ?? new List<string>();
-            }
-        }
-
-        private IEnumerable<YarnProject>? destinationYarnProjects;
-        private IEnumerable<YarnProjectImporter>? destinationYarnProjectImporters;
-
-        public bool HasErrors => DestinationProjectErrors.Any();
+        private YarnProject destinationYarnProject;
+        private YarnProjectImporter destinationYarnProjectImporter;
 
         public override void OnEnable()
         {
             base.OnEnable();
 
-            UpdateDestinationProjects();
+            isSuccessfullyCompiledProperty = serializedObject.FindProperty(nameof(YarnImporter.isSuccessfullyParsed));
+            parseErrorMessagesProperty = serializedObject.FindProperty(nameof(YarnImporter.parseErrorMessages));
+            
+            UpdateDestinationProject();
         }
 
-        private void UpdateDestinationProjects()
+        private void UpdateDestinationProject()
         {
-            if (target is not YarnImporter yarnImporter)
+            destinationYarnProject = (target as YarnImporter).DestinationProject;
+
+            if (destinationYarnProject != null)
             {
-                throw new System.InvalidOperationException($"Internal error: target is not {nameof(YarnImporter)}");
-            }
-            destinationYarnProjects = yarnImporter.DestinationProjects;
-
-            if (destinationYarnProjects != null)
-            {
-                destinationYarnProjectImporters = destinationYarnProjects
-                    .Select(project => AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(project)))
-                    .Where(importer => importer != null)
-                    .OfType<YarnProjectImporter>();
-
-
+                destinationYarnProjectImporter = AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(destinationYarnProject)) as YarnProjectImporter;
             }
         }
 
         public override void OnInspectorGUI()
         {
+
             serializedObject.Update();
-
-            // nice header bit with logo and links
-            DialogueRunnerEditor.DrawYarnSpinnerHeader();
-
-            if (target is not YarnImporter yarnImporter)
-            {
-                EditorGUILayout.HelpBox($"Internal error: target is not a {nameof(YarnImporter)}", MessageType.Error);
-                return;
-            }
+            EditorGUILayout.Space();
 
             // If there's a parse error in any of the selected objects,
             // show an error. If the selected objects have the same
             // destination program, and there's a compile error in it, show
             // that. 
-            if (HasErrors)
+            if (parseErrorMessagesProperty.arraySize > 0)
             {
                 if (serializedObject.isEditingMultipleObjects)
                 {
@@ -86,71 +61,74 @@ namespace Yarn.Unity.Editor
                 }
                 else
                 {
-                    foreach (string error in DestinationProjectErrors)
-                    {
-                        EditorGUILayout.HelpBox(error, MessageType.Error);
+                    foreach (SerializedProperty errorProperty in parseErrorMessagesProperty) {
+                        EditorGUILayout.HelpBox(errorProperty.stringValue, MessageType.Error);
                     }
                 }
+            }
+            else if (DestinationProjectError.Count() > 0)
+            {
+                var displayMessage = string.Join("\n", DestinationProjectError);
+                EditorGUILayout.HelpBox(displayMessage, MessageType.Error);
             }
 
-            if (destinationYarnProjects != null && destinationYarnProjects.Any() != false)
+            if (destinationYarnProject == null)
             {
-                if (destinationYarnProjects.Count() == 1)
-                {
-                    EditorGUILayout.ObjectField("Project", destinationYarnProjects.First(), typeof(YarnProject), false);
-                }
-                else
-                {
-                    EditorGUILayout.LabelField("Projects", EditorStyles.boldLabel);
-                    EditorGUI.indentLevel += 1;
-                    foreach (var project in destinationYarnProjects)
-                    {
-                        EditorGUILayout.ObjectField(project, typeof(YarnProject), false);
-                    }
-                    EditorGUI.indentLevel -= 1;
-                }
-            }
-            else
-            {
-                EditorGUILayout.HelpBox("This script is not currently part of a Yarn Project, so it can't be compiled or loaded into a Dialogue Runner. Either click Create New Yarn Project, or add this folder to an existing Yarn Project's sources list.", MessageType.Info);
+                EditorGUILayout.HelpBox("This script is not currently part of a Yarn Project, so it can't be compiled or loaded into a Dialogue Runner. Either click Create New Yarn Project, or add a Yarn project to the field below.", MessageType.Info);
                 if (GUILayout.Button("Create New Yarn Project..."))
                 {
-                    YarnProjectUtility.CreateYarnProject(yarnImporter);
-                    UpdateDestinationProjects();
+                    YarnProjectUtility.CreateYarnProject(target as YarnImporter);
+
+                    UpdateDestinationProject();
+
                 }
             }
-
-            var settings = YarnSpinnerProjectSettings.GetOrCreateSettings();
-            if (settings.enableDirectLinkToVSCode)
+            
+            using (var change = new EditorGUI.ChangeCheckScope())
             {
-                if (GUILayout.Button("Open in VS Code"))
-                {
-                    // https://code.visualstudio.com/docs/configure/command-line#_opening-vs-code-with-urls
-                    // this implies we should be able to open directly to the line and column
-                    // which would be great for errors
-                    // or if we show what nodes are inside this file we could jump to them directly
-                    // something to explore later
+                var project = EditorGUILayout.ObjectField("Project", destinationYarnProject, typeof(YarnProject), false);
 
-                    // as both the dataPath and assetPath include the Assets folder we need to strip that off before we combine these
-                    var absolutePathToYarnFile = Path.Combine(Path.GetDirectoryName(Application.dataPath), yarnImporter.assetPath);
-
-                    // This approach is bit weird to look at but it gets around a difference of what a URL is between VSCode and C#
-                    // The initial thought is "why not use System.Uri.EscapeDataString?"
-                    // it encodes "/" as "%2F" and "\" as "%5C" which is technically correct
-                    // but vscode doesn't want that it just needs the spaces replaced
-                    // so instead we just manually replace all the spaces with "%20"
-                    // not the best but it works... for now...
-                    absolutePathToYarnFile = absolutePathToYarnFile.Replace(" ", $"%20");
-
-                    var vscodeURL = $"vscode://file{absolutePathToYarnFile}";
-                    Application.OpenURL(vscodeURL);
+                if (change.changed) {
+                    string programPath = null;
+                    if (project != null) {
+                        programPath = AssetDatabase.GetAssetPath(project);
+                    }
+                    YarnProjectUtility.AssignScriptToProject( (target as YarnImporter).assetPath, programPath);
+                    
+                    UpdateDestinationProject();
                 }
+
             }
 
             EditorGUILayout.Space();
 
-            _ = serializedObject.ApplyModifiedProperties();
-            ApplyRevertGUI();
+            var hadChanges = serializedObject.ApplyModifiedProperties();
+
+#if UNITY_2018
+        // Unity 2018's ApplyRevertGUI is buggy, and doesn't automatically
+        // detect changes to the importer's serializedObject. This means
+        // that we'd need to track the state of the importer, and don't
+        // have a way to present a Revert button. 
+        //
+        // Rather than offer a broken experience, on Unity 2018 we
+        // immediately reimport the changes. This is slow (we're
+        // serializing and writing the asset to disk on every property
+        // change!) but ensures that the writes are done.
+        if (hadChanges)
+        {
+            // Manually perform the same tasks as the 'Apply' button would
+            ApplyAndImport();
         }
+#endif
+
+#if UNITY_2019_1_OR_NEWER
+            // On Unity 2019 and newer, we can use an ApplyRevertGUI that
+            // works identically to the built-in importer inspectors.
+            ApplyRevertGUI();
+#endif
+        }
+
+
+
     }
 }

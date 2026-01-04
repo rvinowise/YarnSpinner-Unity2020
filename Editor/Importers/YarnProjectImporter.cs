@@ -1,94 +1,54 @@
-/*
-Yarn Spinner is licensed to you under the terms found in the file LICENSE.md.
-*/
-
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
 using UnityEditor;
+#if UNITY_2020_2_OR_NEWER
 using UnityEditor.AssetImporters;
+#else
+using UnityEditor.Experimental.AssetImporters;
+#endif
 using UnityEngine;
+using System.Linq;
 using Yarn.Compiler;
-using Yarn.Utility;
+using System.IO;
+using UnityEditorInternal;
+using System.Collections;
 
 #if USE_UNITY_LOCALIZATION
 using UnityEditor.Localization;
 using UnityEngine.Localization.Tables;
 #endif
 
-#nullable enable
-
 namespace Yarn.Unity.Editor
 {
-    /// <summary>
-    /// Imports a .yarnproject file and produces a <see cref="YarnProject"/>
-    /// asset.
-    /// </summary>
-    [ScriptedImporter(7, new[] { "yarnproject" }, 1000), HelpURL("https://docs.yarnspinner.dev/using-yarnspinner-with-unity/importing-yarn-files/yarn-projects")]
+    [ScriptedImporter(3, new[] { "yarnproject" }, 1), HelpURL("https://yarnspinner.dev/docs/unity/components/yarn-programs/")]
     [InitializeOnLoad]
-    public class YarnProjectImporter : ScriptedImporter
+    public class YarnProjectImporter : ScriptedImporter, IYarnErrorSource
     {
-        /// <summary>
-        /// A regular expression that matches characters following the start of
-        /// the string or an underscore. 
-        /// </summary>
-        /// <remarks>
-        /// Used as part of converting variable names from snake_case to
-        /// CamelCase when generating C# variable source code.
-        /// </remarks>
-        private static readonly System.Text.RegularExpressions.Regex SnakeCaseToCamelCase = new System.Text.RegularExpressions.Regex(@"(^|_)(\w)");
+        static YarnProjectImporter() => YarnPreventPlayMode.AddYarnErrorSourceType<YarnProjectImporter>("t:YarnProject");
 
-        /// <summary>
-        /// Stores information about a variable declaration found in a compiled
-        /// Yarn Project.
-        /// </summary>
         [System.Serializable]
         public class SerializedDeclaration
         {
             internal static List<Yarn.IType> BuiltInTypesList = new List<Yarn.IType> {
-                Yarn.Types.String,
-                Yarn.Types.Boolean,
-                Yarn.Types.Number,
+                Yarn.BuiltinTypes.String,
+                Yarn.BuiltinTypes.Boolean,
+                Yarn.BuiltinTypes.Number,
             };
 
-            /// <summary>
-            /// The name of the variable.
-            /// </summary>
             public string name = "$variable";
 
-            /// <summary>
-            /// The type of the variable.
-            /// </summary>
             [UnityEngine.Serialization.FormerlySerializedAs("type")]
-            public string typeName = Yarn.Types.String.Name;
+            public string typeName = Yarn.BuiltinTypes.String.Name;
 
-            /// <summary>
-            /// The description of the variable.
-            /// </summary>
-            public string? description;
+            public bool defaultValueBool;
+            public float defaultValueNumber;
+            public string defaultValueString;
 
-            /// <summary>
-            /// Whether the variable was explicitly declared (i.e. using a
-            /// <c>&lt;&lt;declare&gt;&gt;</c> statement), or whether it was
-            /// implicitly declared through usage.
-            /// </summary>
+            public string description;
+
             public bool isImplicit;
 
-            /// <summary>
-            /// A reference to the source <c>.yarn</c> file in which the
-            /// variable was declared (either implicitly or explicitly.)
-            /// </summary>
             public TextAsset sourceYarnAsset;
 
-            /// <summary>
-            /// Initialises a new instance of the SerializedDeclaration class
-            /// using a <see cref="Declaration"/>.
-            /// </summary>
-            /// <param name="decl">A <see cref="Declaration"/> containing
-            /// information about a Yarn variable.</param>
             public SerializedDeclaration(Declaration decl)
             {
                 this.name = decl.Name;
@@ -96,922 +56,307 @@ namespace Yarn.Unity.Editor
                 this.description = decl.Description;
                 this.isImplicit = decl.IsImplicit;
 
-                string sourceScriptPath = GetRelativePath(decl.SourceFileName);
+                sourceYarnAsset = AssetDatabase.LoadAssetAtPath<TextAsset>(decl.SourceFileName);
 
-                sourceYarnAsset = AssetDatabase.LoadAssetAtPath<TextAsset>(sourceScriptPath);
+                if (this.typeName == BuiltinTypes.String.Name) {
+                    this.defaultValueString = System.Convert.ToString(decl.DefaultValue);
+                } else if (this.typeName == BuiltinTypes.Boolean.Name) {
+                    this.defaultValueBool = System.Convert.ToBoolean(decl.DefaultValue);
+                } else if (this.typeName == BuiltinTypes.Number.Name) {
+                    this.defaultValueNumber = System.Convert.ToSingle(decl.DefaultValue);
+                } else {
+                    throw new System.InvalidOperationException($"Invalid declaration type {decl.Type.Name}");
+                }
             }
         }
 
-        private class FunctionDeclarationReceiver : IActionRegistration
+        [System.Serializable]
+        /// <summary>
+        /// Pairs a language ID with a TextAsset.
+        /// </summary>
+        public class LanguageToSourceAsset
         {
-            public List<Declaration> FunctionDeclarations = new();
+            /// <summary>
+            /// The locale ID that this translation should create a
+            /// Localization for.
+            /// </summary>
+            [Language]
+            public string languageID;
 
-            public void AddCommandHandler(string commandName, System.Delegate handler) { }
+            /// <summary>
+            /// The TextAsset containing CSV data that the Localization
+            /// should use.
+            /// </summary>
+            // Hide this when its value is equal to whatever property is
+            // stored in the YarnProjectImporterEditor class's
+            // CurrentProjectDefaultLanguageProperty.
+            [HideWhenPropertyValueEqualsContext(
+                "languageID",
+                typeof(YarnProjectImporterEditor),
+                nameof(YarnProjectImporterEditor.CurrentProjectDefaultLanguageProperty),
+                "Automatically included"
+                )]
+            [UnityEngine.Serialization.FormerlySerializedAs("stringsAsset")]
+            public TextAsset stringsFile;
 
-            public void AddCommandHandler(string commandName, MethodInfo methodInfo) { }
-
-            public void AddFunction(string name, System.Delegate implementation) { }
-
-            public void RegisterFunctionDeclaration(string name, System.Type returnType, System.Type[] parameterTypes)
-            {
-                if (Types.TypeMappings.TryGetValue(returnType, out var returnYarnType) == false)
-                {
-                    Debug.LogError($"Can't register function {name}: can't convert return type {returnType} to a Yarn type");
-                    return;
-                }
-
-                var typeBuilder = new FunctionTypeBuilder().WithReturnType(returnYarnType);
-
-
-                for (int i = 0; i < parameterTypes.Length; i++)
-                {
-                    System.Type? parameter = parameterTypes[i];
-
-                    bool isParamsArray = false;
-
-                    if (i == parameterTypes.Length - 1 && parameter.IsArray)
-                    {
-                        // If this is the last parameter and it is an array,
-                        // treat it as though it were a params array and use the
-                        // type of the array
-                        parameter = parameter.GetElementType();
-                        isParamsArray = true;
-                    }
-
-                    if (Types.TypeMappings.TryGetValue(parameter, out var parameterYarnType) == false)
-                    {
-                        Debug.LogError($"Can't register function {name}: can't convert parameter {i} type {parameterYarnType} to a Yarn type");
-                        return;
-                    }
-
-                    if (isParamsArray)
-                    {
-                        typeBuilder = typeBuilder.WithVariadicParameterType(parameterYarnType);
-                    }
-                    else
-                    {
-                        typeBuilder = typeBuilder.WithParameter(parameterYarnType);
-                    }
-                }
-
-                var decl = new DeclarationBuilder()
-                    .WithName(name)
-                    .WithType(typeBuilder.FunctionType)
-                    .Declaration;
-
-                this.FunctionDeclarations.Add(decl);
-            }
-
-            public void RemoveCommandHandler(string commandName) { }
-
-            public void RemoveFunction(string name) { }
+            /// <summary>
+            /// The folder containing additional assets for the lines, such
+            /// as voiceover audio files.
+            /// </summary>
+            public DefaultAsset assetsFolder;
         }
 
-        /// <summary>
-        /// Whether to generate a C# file that contains properties for each variable.
-        /// </summary>
-        /// <seealso cref="variablesClassName"/>
-        /// <seealso cref="variablesClassNamespace"/>
-        /// <seealso cref="variablesClassParent"/>
-        public bool generateVariablesSourceFile = false;
+        public List<TextAsset> sourceScripts = new List<TextAsset>();
 
-        /// <summary>
-        /// The name of the generated variables storage class.
-        /// </summary>
-        /// <seealso cref="generateVariablesSourceFile"/>
-        /// <seealso cref="variablesClassNamespace"/>
-        /// <seealso cref="variablesClassParent"/>
-        public string variablesClassName = "YarnVariables";
+        public List<string> compileErrors = new List<string>();
 
-        /// <summary>
-        /// The namespace of the generated variables storage class.
-        /// </summary>
-        /// <seealso cref="generateVariablesSourceFile"/>
-        /// <seealso cref="variablesClassName"/>
-        /// <seealso cref="variablesClassParent"/>
-        public string? variablesClassNamespace = null;
+        public List<SerializedDeclaration> serializedDeclarations = new List<SerializedDeclaration>();
 
-        /// <summary>
-        /// The parent class of the generated variables storage class.
-        /// </summary>
-        /// <seealso cref="generateVariablesSourceFile"/>
-        /// <seealso cref="variablesClassName"/>
-        /// <seealso cref="variablesClassNamespace"/>
-        public string variablesClassParent = typeof(InMemoryVariableStorage).FullName;
+        [Language]
+        public string defaultLanguage = System.Globalization.CultureInfo.CurrentCulture.Name;
 
-        /// <summary>
-        /// Whether or not this Yarn project's built-in Localizations will use
-        /// Addressable Assets.
-        /// </summary>
-        /// <remarks>This value is only used when the project is not configured
-        /// to use Unity Localization.</remarks>
+        public List<LanguageToSourceAsset> languagesToSourceAssets;
+
         public bool useAddressableAssets;
 
-        internal static string UnityProjectRootPath => Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
-
-        // Scripted importers can't have direct references to scriptable
-        // objects, so we'll store the reference as a string containing the
-        // GUID. This is also used to store a reference to a string table if
-        // Unity Localisation is not installed.
-        public string? unityLocalisationStringTableCollectionGUID;
-
-        public bool UseUnityLocalisationSystem = false;
-#if USE_UNITY_LOCALIZATION
-
-        private StringTableCollection? _cachedStringTableCollection;
+        /// <summary>
+        /// If <see langword="true"/>, <see cref="ActionManager"/> will search
+        /// all assemblies that have been defined using an <see
+        /// cref="AssemblyDefinitionAsset"/> for commands and actions, when this
+        /// project is loaded into a <see cref="DialogueRunner"/>. Otherwise,
+        /// <see cref="assembliesToSearch"/> will be used.
+        /// </summary>
+        /// <seealso cref="assembliesToSearch"/>
+        public bool searchAllAssembliesForActions = true;
 
         /// <summary>
-        /// Gets or sets the Unity Localization string table collection
-        /// associated with this importer.
+        /// If <see cref="searchAllAssembliesForActions"/> is <see
+        /// langword="false"/>, <see cref="ActionManager"/> will search for
+        /// commands and functions in the assemblies defined in this list, when
+        /// this project is loaded into a <see cref="DialogueRunner"/>.
         /// </summary>
-        public StringTableCollection? UnityLocalisationStringTableCollection
-        {
-            get
-            {
-                if (_cachedStringTableCollection == null)
-                {
-                    if (!string.IsNullOrEmpty(unityLocalisationStringTableCollectionGUID))
-                    {
-                        var assetPath = AssetDatabase.GUIDToAssetPath(unityLocalisationStringTableCollectionGUID);
+        /// <seealso cref="searchAllAssembliesForActions"/>
+        public AssemblyDefinitionAsset[] assembliesToSearch;
 
-                        if (!string.IsNullOrEmpty(assetPath))
-                        {
-                            _cachedStringTableCollection = AssetDatabase.LoadAssetAtPath<StringTableCollection>(assetPath);
-                        }
-                    }
-                }
-                return _cachedStringTableCollection;
-            }
-            set
-            {
-                if (value == null)
-                {
-                    unityLocalisationStringTableCollectionGUID = string.Empty;
-                    _cachedStringTableCollection = null;
-                    return;
-                }
+#if UNITY_2020_2_OR_NEWER
+        [NonReorderable]
+#endif
+        public FunctionInfo[] ListOfFunctions;
 
-                if (!AssetDatabase.TryGetGUIDAndLocalFileIdentifier(value, out var guid, out long _))
-                {
-                    throw new System.InvalidOperationException($"String table collection {value.name} has no GUID - is it not an asset stored on disk?");
-                }
+        IList<string> IYarnErrorSource.CompileErrors => compileErrors;
 
-                unityLocalisationStringTableCollectionGUID = guid;
-                _cachedStringTableCollection = value;
-            }
-        }
+        bool IYarnErrorSource.Destroyed => this == null;
+
+#if USE_UNITY_LOCALIZATION && YARN_ENABLE_EXPERIMENTAL_FEATURES
+        public bool UseUnityLocalisationSystem = false;
+        public StringTableCollection unityLocalisationStringTableCollection;
 #endif
 
-        /// <summary>
-        /// Gets a <see cref="Project"/> loaded from this importer's asset file,
-        /// or <see langword="null"/> if an error is encountered.
-        /// </summary>
-        /// <returns>A loaded <see cref="Project"/> representing the data from
-        /// the file that this asset importer represents, or <see
-        /// langword="null"/>.</returns>
-        public Project? GetProject()
-        {
-            try
-            {
-                return Project.LoadFromFile(this.assetPath);
-            }
-            catch (System.Exception)
-            {
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Gets the <see cref="ProjectImportData"/> created the last time that
-        /// this Yarn Project was imported, if available.
-        /// </summary>
-        public ProjectImportData? ImportData => AssetDatabase.LoadAssetAtPath<ProjectImportData>(this.assetPath);
-
-        /// <summary>
-        /// Gets a value indicating whether this Yarn Project includes a Yarn
-        /// script as part of its compilation.
-        /// </summary>
-        /// <param name="yarnImporter">The importer for a Yarn script.</param>
-        /// <returns><see langword="true"/> if this Yarn Project uses the file
-        /// represented by yarnImporter; <see langword="false"/>
-        /// otherwise.</returns>
-        public bool GetProjectReferencesYarnFile(YarnImporter yarnImporter)
-        {
-            try
-            {
-                var project = Project.LoadFromFile(this.assetPath);
-                var scriptFile = yarnImporter.assetPath;
-
-                var scriptFileWithEnvironmentSeparators = string.Join(System.IO.Path.DirectorySeparatorChar, scriptFile.Split('/'));
-
-                var projectRelativeSourceFiles = project.SourceFiles.Select(GetRelativePath);
-
-                return projectRelativeSourceFiles.Contains(scriptFileWithEnvironmentSeparators);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Gets the Yarn string table produced as a result of compiling the Yarn
-        /// Project, or <see langword="null"/> if no string table could be produced.
-        /// </summary>
-        private Dictionary<string, StringInfo>? GetYarnStringTable()
-        {
-            Project project;
-            try
-            {
-                project = Project.LoadFromFile(this.assetPath);
-            }
-            catch (System.Exception)
-            {
-                return null;
-            }
-
-            var job = CompilationJob.CreateFromFiles(project.SourceFiles);
-            job.LanguageVersion = project.FileVersion;
-            job.CompilationType = CompilationJob.Type.StringsOnly;
-
-            try
-            {
-                var compilationResult = Compiler.Compiler.Compile(job);
-
-                return new(compilationResult.StringTable);
-            }
-            catch (System.Exception)
-            {
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Called by Unity to import an asset.
-        /// </summary>
-        /// <param name="ctx">The context for the asset import
-        /// operation.</param>
         public override void OnImportAsset(AssetImportContext ctx)
         {
 #if YARNSPINNER_DEBUG
             UnityEngine.Profiling.Profiler.enabled = true;
 #endif
 
-            var projectAsset = ScriptableObject.CreateInstance<YarnProject>();
+            var project = ScriptableObject.CreateInstance<YarnProject>();
 
-            projectAsset.name = Path.GetFileNameWithoutExtension(ctx.assetPath);
+            project.name = Path.GetFileNameWithoutExtension(ctx.assetPath);
 
             // Start by creating the asset - no matter what, we need to
             // produce an asset, even if it doesn't contain valid Yarn
             // bytecode, so that other assets don't lose their references.
-            ctx.AddObjectToAsset("Project", projectAsset);
-            ctx.SetMainObject(projectAsset);
+            ctx.AddObjectToAsset("Project", project);
+            ctx.SetMainObject(project);
 
-            var importData = ScriptableObject.CreateInstance<ProjectImportData>();
-            importData.name = "Project Import Data";
-            ctx.AddObjectToAsset("ImportData", importData);
-
-            // Attempt to load the JSON project file.
-            Project project;
-            try
+            foreach (var script in sourceScripts)
             {
-                project = Yarn.Compiler.Project.LoadFromFile(ctx.assetPath);
+                string path = AssetDatabase.GetAssetPath(script);
+                if (string.IsNullOrEmpty(path))
+                {
+                    // This is, for some reason, not a valid script we can
+                    // use. Don't add a dependency on it.
+                    continue;
+                }
+                ctx.DependsOnSourceAsset(path);
             }
-            catch (System.Exception)
-            {
-                var text = File.ReadAllText(ctx.assetPath);
-                if (text.StartsWith("title:"))
-                {
-                    // This is an old-style project that needs to be upgraded.
-                    importData.ImportStatus = ProjectImportData.ImportStatusCode.NeedsUpgradeFromV1;
 
-                    // Log to notify the user that this needs to be done.
-                    ctx.LogImportError($"Yarn Project {ctx.assetPath} is a version 1 Yarn Project, and needs to be upgraded. Select it in the Inspector, and click Upgrade Yarn project.", this);
-                }
-                else
+            // Parse declarations 
+            var localDeclarationsCompileJob = CompilationJob.CreateFromFiles(ctx.assetPath);
+            localDeclarationsCompileJob.CompilationType = CompilationJob.Type.DeclarationsOnly;
+
+            var library = new Library();
+            ActionManager.AddActionsFromAssemblies(AssemblySearchList());
+            ActionManager.RegisterFunctions(library);
+            localDeclarationsCompileJob.Library = library;
+            ListOfFunctions = predeterminedFunctions().ToArray();
+
+            IEnumerable<Declaration> localDeclarations;
+
+            compileErrors.Clear();
+
+            var result = Compiler.Compiler.Compile(localDeclarationsCompileJob);
+            localDeclarations = result.Declarations;
+
+            IEnumerable<Diagnostic> errors;
+            
+            errors = result.Diagnostics.Where(d => d.Severity == Diagnostic.DiagnosticSeverity.Error);
+
+            if (errors.Count() > 0)
+            {
+                // We encountered errors while parsing for declarations.
+                // Report them and exit.
+                foreach (var error in errors)
                 {
-                    // We don't know what's going on.
-                    importData.ImportStatus = ProjectImportData.ImportStatusCode.Unknown;
+                    ctx.LogImportError($"Error in Yarn Project: {error}");
+                    compileErrors.Add($"Error in Yarn Project {ctx.assetPath}: {error}");
                 }
-                // Either way, we can't continue.
+
                 return;
             }
 
-            importData.sourceFilePatterns = new();
-            importData.sourceFilePatterns.AddRange(project.SourceFilePatterns);
+            localDeclarations = localDeclarations
+                .Where(decl => decl.Name.StartsWith("$Yarn.Internal") == false);
 
-            importData.baseLanguageName = project.BaseLanguage;
+            // Store these so that we can continue displaying them after
+            // this import step, in case there are compile errors later.
+            // We'll replace this with a more complete list later if
+            // compilation succeeds.
+            serializedDeclarations = localDeclarations
+                .Where(decl => !(decl.Type is FunctionType))
+                .Select(decl => new SerializedDeclaration(decl)).ToList();
 
-            foreach (var loc in project.Localisation)
+            // We're done processing this file - we've parsed it, and
+            // pulled any information out of it that we need to. Now to
+            // compile the scripts associated with this project.
+
+            var scriptImporters = sourceScripts.Where(s => s != null).Select(s => AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(s)) as YarnImporter);
+
+            // First step: check to see if there's any parse errors in the
+            // files.
+            var scriptsWithParseErrors = scriptImporters.Where(script => script.isSuccessfullyParsed == false);
+
+            if (scriptsWithParseErrors.Count() != 0)
             {
-                ProjectImportData.LocalizationEntry locInfo;
-
-                // am force unwrapping the strings due to a bug
-                // the IsNullOrEmpty check on this version of dotnet doesn't propogate it's understanding that the value isn't null
-                // in a future version this will go away as a concern.
-                if (string.IsNullOrEmpty(loc.Value.Strings) == false && loc.Value.Strings!.StartsWith("unity:"))
-                {
-                    // This is an external Localization asset.
-                    locInfo = new ProjectImportData.LocalizationEntry
-                    {
-                        languageID = loc.Key,
-                        isExternal = true,
-                        externalLocalization = AssetDatabase.LoadAssetAtPath<Localization>(AssetDatabase.GUIDToAssetPath(loc.Value.Strings.Substring("unity:".Length)))
-                    };
-                }
-                else
-                {
-                    var hasStringsFile = project.TryGetStringsPath(loc.Key, out var stringsFilePath);
-                    var hasAssetsFolder = project.TryGetAssetsPath(loc.Key, out var assetsFolderPath);
-
-                    // This is a reference to a strings table file and a folder
-                    // containing assets.
-                    locInfo = new ProjectImportData.LocalizationEntry
-                    {
-                        languageID = loc.Key,
-                        isExternal = false,
-                        stringsFile = hasStringsFile ? AssetDatabase.LoadAssetAtPath<TextAsset>(stringsFilePath) : null,
-                        assetsFolder = hasAssetsFolder ? AssetDatabase.LoadAssetAtPath<DefaultAsset>(assetsFolderPath) : null
-                    };
-                }
-                importData.localizations.Add(locInfo);
+                // Parse errors! We can't continue.
+                string failingScriptNameList = string.Join("\n", scriptsWithParseErrors.Select(script => script.assetPath));
+                compileErrors.Add($"Parse errors exist in the following files:\n{failingScriptNameList}");
+                return;
             }
 
-            if (project.Localisation.ContainsKey(project.BaseLanguage) == false)
+            // Get paths to the scripts we're importing, and also map them
+            // to their corresponding importer
+            var pathsToImporters = scriptImporters.ToDictionary(script => script.assetPath, script => script);
+
+            if (pathsToImporters.Count == 0)
             {
-                importData.localizations.Add(new ProjectImportData.LocalizationEntry
-                {
-                    languageID = project.BaseLanguage,
-                });
+                return; // nothing further to do here
             }
 
-            var projectRelativeSourceFiles = project.SourceFiles.Select(GetRelativePath);
+            // We now now compile!
+            var job = CompilationJob.CreateFromFiles(pathsToImporters.Keys);
+            job.VariableDeclarations = localDeclarations;
+
+            job.Library = library;
 
             CompilationResult compilationResult;
 
-            if (projectRelativeSourceFiles.Any())
+            compilationResult = Compiler.Compiler.Compile(job);
+
+            errors = compilationResult.Diagnostics.Where(d => d.Severity == Diagnostic.DiagnosticSeverity.Error);
+
+            if (errors.Count() > 0) 
             {
-                // This project depends upon this script
-                foreach (var scriptPath in projectRelativeSourceFiles)
+                var errorGroups = errors.GroupBy(e => e.FileName);
+                foreach (var errorGroup in errorGroups)
                 {
-                    string guid = AssetDatabase.AssetPathToGUID(scriptPath);
+                    var errorMessages = errorGroup.Select(e => e.ToString());
 
-                    ctx.DependsOnSourceAsset(scriptPath);
+                    var asset = AssetDatabase.LoadAssetAtPath<Object>(errorGroup.Key);
 
-                    importData.yarnFiles.Add(AssetDatabase.LoadAssetAtPath<TextAsset>(scriptPath));
-                }
-
-                // Get all function declarations found in the Unity project
-                var functionDeclarationReceiver = new FunctionDeclarationReceiver();
-
-                foreach (var registrationAction in Actions.ActionRegistrationMethods)
-                {
-                    registrationAction(functionDeclarationReceiver, RegistrationType.Compilation);
-                }
-
-                // Now to compile the scripts associated with this project.
-                var job = CompilationJob.CreateFromFiles(project.SourceFiles);
-                job.LanguageVersion = project.FileVersion;
-                job.Declarations = functionDeclarationReceiver.FunctionDeclarations;
-
-                try
-                {
-                    compilationResult = Compiler.Compiler.Compile(job);
-                }
-                catch (System.Exception e)
-                {
-                    var errorMessage = $"Encountered an unhandled exception during compilation: {e.Message}";
-                    Debug.LogException(e);
-                    ctx.LogImportError(errorMessage, null);
-
-                    importData.diagnostics.Add(new ProjectImportData.DiagnosticEntry
+                    foreach (var error in errorGroup)
                     {
-                        yarnFile = null,
-                        errorMessages = new List<string> { errorMessage },
-                    });
-                    importData.ImportStatus = ProjectImportData.ImportStatusCode.CompilationFailed;
-                    return;
-                }
-
-                var errors = compilationResult.Diagnostics.Where(d => d.Severity == Diagnostic.DiagnosticSeverity.Error);
-
-                if (errors.Count() > 0)
-                {
-                    var errorGroups = errors.GroupBy(e => e.FileName);
-                    foreach (var errorGroup in errorGroups)
-                    {
-                        if (errorGroup.Key == null)
-                        {
-                            // ok so we have no file for some reason
-                            // so these are errors currently not tied to a file
-                            // so we instead need to just log the errors and move on
-                            foreach (var error in errorGroup)
-                            {
-                                ctx.LogImportError($"Error compiling project: {error.Message}");
-                            }
-
-                            importData.diagnostics.Add(new ProjectImportData.DiagnosticEntry
-                            {
-                                yarnFile = null,
-                                errorMessages = errorGroup.Select(e => e.Message).ToList(),
-                            });
-
-                            continue;
-                        }
-
-                        // the compiler currently returns (unknown) for situations where an error is defined in a file that the compiler can't access
-                        // this is not ideal and something to fix, but for now we will handle it by reporting the issue in a different way
-                        if (errorGroup.Key == "(unknown)")
-                        {
-                            foreach (var error in errorGroup)
-                            {
-                                ctx.LogImportError($"Error compiling the project: {error.Message}");
-                            }
-                            var errorMessages = errorGroup.Select(e => e.ToString());
-                            importData.diagnostics.Add(new ProjectImportData.DiagnosticEntry
-                            {
-                                yarnFile = null,
-                                errorMessages = errorMessages.ToList(),
-                            });
-                            continue;
-                        }
-
-                        try
-                        {
-                            var relativePath = GetRelativePath(errorGroup.Key);
-
-                            var asset = AssetDatabase.LoadAssetAtPath<Object>(relativePath);
-
-                            foreach (var error in errorGroup)
-                            {
-                                var relativeErrorFileName = GetRelativePath(error.FileName);
-                                ctx.LogImportError($"Error compiling <a href=\"{relativeErrorFileName}\">{relativeErrorFileName}</a> line {error.Range.Start.Line + 1}: {error.Message}", asset);
-                            }
-
-                            var fileWithErrors = AssetDatabase.LoadAssetAtPath<TextAsset>(relativePath);
-
-                            // TODO: Associate this compile error to the
-                            // corresponding script
-
-                            var errorMessages = errorGroup.Select(e => e.ToString());
-                            importData.diagnostics.Add(new ProjectImportData.DiagnosticEntry
-                            {
-                                yarnFile = fileWithErrors,
-                                errorMessages = errorMessages.ToList(),
-                            });
-                        }
-                        catch (System.Exception ex)
-                        {
-                            ctx.LogImportError($"Import failed with an unhandled exception: {ex.Message}");
-                        }
+                        ctx.LogImportError($"Error compiling <a href=\"{error.FileName}\">{error.FileName}</a> line {error.Range.Start.Line + 1}: {error.Message}", asset);
                     }
-                    importData.ImportStatus = ProjectImportData.ImportStatusCode.CompilationFailed;
-                    return;
+
+                    // Associate this compile error to the corresponding
+                    // script's importer.
+                    var importer = pathsToImporters[errorGroup.Key];
+                    var path = errorGroup.Key;
+
+                    compileErrors.AddRange(errorMessages);
+
+                    importer.parseErrorMessages.AddRange(errorMessages);
+                    EditorUtility.SetDirty(importer);
                 }
 
-                if (compilationResult.Program == null)
-                {
-                    ctx.LogImportError("Internal error: Failed to compile: resulting program was null, but compiler did not report errors.");
-                    return;
-                }
-
-                importData.containsImplicitLineIDs = compilationResult.ContainsImplicitStringTags;
-
-                // Store _all_ declarations - both the ones in this .yarnproject
-                // file, and the ones inside the .yarn files.
-
-                // While we're here, filter out any declarations that begin with
-                // our Yarn internal prefix. These are synthesized variables
-                // that are generated as a result of the compilation, and are
-                // not declared by the user.
-                importData.serializedDeclarations = compilationResult.Declarations
-                    .Where(decl => !decl.Name.StartsWith("$Yarn.Internal."))
-                    .Where(decl => !(decl.Type is FunctionType))
-                    .Select(decl => new SerializedDeclaration(decl)).ToList();
-
-#if USE_UNITY_LOCALIZATION
-                if (UseUnityLocalisationSystem)
-                {
-                    // Mark that this project uses Unity Localization; we'll
-                    // populate the string table later, in a post-processor.
-                    projectAsset.localizationType = LocalizationType.Unity;
-                }
-                else
-                {
-                    CreateYarnInternalLocalizationAssets(ctx, projectAsset, compilationResult, importData);
-                    projectAsset.localizationType = LocalizationType.YarnInternal;
-                }
-#else
-                CreateYarnInternalLocalizationAssets(ctx, projectAsset, compilationResult, importData);
-                projectAsset.localizationType = LocalizationType.YarnInternal;
-#endif
-
-                // Store the compiled program
-                byte[] compiledBytes;
-
-                using (var memoryStream = new MemoryStream())
-                using (var outputStream = new Google.Protobuf.CodedOutputStream(memoryStream))
-                {
-                    // Serialize the compiled program to memory
-                    compilationResult.Program.WriteTo(outputStream);
-                    outputStream.Flush();
-
-                    compiledBytes = memoryStream.ToArray();
-                }
-
-                projectAsset.compiledYarnProgram = compiledBytes;
-
-                if (generateVariablesSourceFile)
-                {
-                    // Generate the variable source; if it's different to what's
-                    // on disk, import it.
-                    var assetPath = ctx.assetPath;
-                    EditorApplication.delayCall += () =>
-                    {
-                        var fileName = variablesClassName + ".cs";
-
-                        var generatedSourcePath = Path.Combine(Path.GetDirectoryName(assetPath), fileName);
-                        bool generated = GenerateVariableSource(generatedSourcePath, project, compilationResult);
-                        if (generated)
-                        {
-                            AssetDatabase.ImportAsset(generatedSourcePath);
-                        }
-                    };
-                }
+                return;
             }
 
-            importData.ImportStatus = ProjectImportData.ImportStatusCode.Succeeded;
+            if (compilationResult.Program == null)
+            {
+                ctx.LogImportError("Internal error: Failed to compile: resulting program was null, but compiler did not report errors.");
+                return;
+            }
+
+            // Store _all_ declarations - both the ones in this
+            // .yarnproject file, and the ones inside the .yarn files.
+
+            // While we're here, filter out any declarations that begin with our
+            // Yarn internal prefix. These are synthesized variables that are
+            // generated as a result of the compilation, and are not declared by
+            // the user.
+            serializedDeclarations = localDeclarations
+                .Concat(compilationResult.Declarations)
+                .Where(decl => !decl.Name.StartsWith("$Yarn.Internal."))
+                .Where(decl => !(decl.Type is FunctionType))
+                .Select(decl => new SerializedDeclaration(decl)).ToList();
+
+            // Clear error messages from all scripts - they've all passed
+            // compilation
+            foreach (var importer in pathsToImporters.Values)
+            {
+                importer.parseErrorMessages.Clear();
+                EditorUtility.SetDirty(importer);
+            }
+
+#if USE_UNITY_LOCALIZATION && YARN_ENABLE_EXPERIMENTAL_FEATURES
+            if (UseUnityLocalisationSystem)
+            {
+                AddStringTableEntries(compilationResult, this.unityLocalisationStringTableCollection);
+                project.localizationType = LocalizationType.Unity;
+            } else {
+                CreateYarnInternalLocalizationAssets(ctx, project, compilationResult);
+                project.localizationType = LocalizationType.YarnInternal;
+            }
+#else
+            CreateYarnInternalLocalizationAssets(ctx, project, compilationResult);
+            project.localizationType = LocalizationType.YarnInternal;
+#endif
+
+            // Store the compiled program
+            byte[] compiledBytes = null;
+
+            using (var memoryStream = new MemoryStream())
+            using (var outputStream = new Google.Protobuf.CodedOutputStream(memoryStream))
+            {
+                // Serialize the compiled program to memory
+                compilationResult.Program.WriteTo(outputStream);
+                outputStream.Flush();
+
+                compiledBytes = memoryStream.ToArray();
+            }
+
+            project.compiledYarnProgram = compiledBytes;
+
+            project.searchAssembliesForActions = AssemblySearchList();
 
 #if YARNSPINNER_DEBUG
             UnityEngine.Profiling.Profiler.enabled = false;
 #endif
-        }
-
-        private bool GenerateVariableSource(string outputPath, Project project, CompilationResult compilationResult)
-        {
-            string? existingContent = null;
-
-            if (File.Exists(outputPath))
-            {
-                // If the file already exists on disk, read it all in now. We'll
-                // compare it to what we generated and, if the contents match
-                // exactly, we don't need to re-import the resulting C# script.
-                existingContent = File.ReadAllText(outputPath);
-            }
-
-            if (string.IsNullOrEmpty(variablesClassName))
-            {
-                Debug.LogError("Can't generate variable interface, because the specified class name is empty.");
-                return false;
-            }
-
-            StringBuilder sb = new StringBuilder();
-            int indentLevel = 0;
-            const int indentSize = 4;
-
-            void WriteLine(string line = "", int offset = 0)
-            {
-                if (line.Length > 0)
-                {
-                    sb.Append(new string(' ', (indentLevel + offset) * indentSize));
-                }
-                sb.AppendLine(line);
-            }
-            void WriteComment(string comment = "") => WriteLine("// " + comment);
-
-            if (string.IsNullOrEmpty(variablesClassNamespace) == false)
-            {
-                WriteLine($"namespace {variablesClassNamespace} {{");
-                WriteLine();
-                indentLevel += 1;
-            }
-
-            WriteLine("using Yarn.Unity;");
-            WriteLine();
-
-            void WriteGeneratedCodeAttribute()
-            {
-                var toolName = "YarnSpinner";
-                var toolVersion = this.GetType().Assembly.GetName().Version.ToString();
-                WriteLine($"[System.CodeDom.Compiler.GeneratedCode(\"{toolName}\", \"{toolVersion}\")]");
-            }
-
-            // For each user-defined enum, create a C# enum type
-            IEnumerable<EnumType> enumTypes = compilationResult.UserDefinedTypes.OfType<Yarn.EnumType>();
-
-            foreach (var type in enumTypes)
-            {
-                WriteLine($"/// <summary>");
-                if (string.IsNullOrEmpty(type.Description) == false)
-                {
-                    WriteLine($"/// {type.Description}");
-                }
-                else
-                {
-                    WriteLine($"/// {type.Name}");
-                }
-                WriteLine($"/// </summary>");
-
-                WriteLine($"/// <remarks>");
-                WriteLine($"/// Automatically generated from Yarn project at {this.assetPath}.");
-                WriteLine($"/// </remarks>");
-
-                WriteGeneratedCodeAttribute();
-
-                // Enums are always stored as integers; strings are represented
-                // as CRC32 hashes of the raw value
-                WriteLine($"public enum {type.Name} {{");
-
-                indentLevel += 1;
-
-                foreach (var enumCase in type.EnumCases)
-                {
-                    WriteLine();
-
-                    WriteLine($"/// <summary>");
-                    if (string.IsNullOrEmpty(enumCase.Value.Description) == false)
-                    {
-                        WriteLine($"/// {enumCase.Value.Description}");
-                    }
-                    else
-                    {
-                        WriteLine($"/// {enumCase.Key}");
-                    }
-                    WriteLine($"/// </summary>");
-
-                    if (type.RawType == Types.Number)
-                    {
-                        WriteLine($"{enumCase.Key} = {enumCase.Value.Value},");
-                    }
-                    else if (type.RawType == Types.String)
-                    {
-                        WriteLine($"/// <remarks>");
-                        WriteLine($"/// Backing value: \"{enumCase.Value.Value}\"");
-                        WriteLine($"/// </remarks>");
-                        var stringValue = (string)enumCase.Value.Value;
-                        WriteComment($"\"{stringValue}\"");
-                        // Get the hash of the string, and convert it to a
-                        // signed integer. (Unity doesn't correctly handle enums
-                        // whose backing value is a uint (values over signed
-                        // integer max are clamped to zero), so we'll cast it here.)
-                        WriteLine($"{enumCase.Key} = {(int)CRC32.GetChecksum(stringValue)},");
-                    }
-                    else
-                    {
-                        WriteComment($"Error: enum case {type.Name}.{enumCase.Key} has an invalid raw type {type.RawType.Name}");
-                    }
-                }
-
-                indentLevel -= 1;
-
-                WriteLine($"}}");
-                WriteLine();
-            }
-
-            if (enumTypes.Any())
-            {
-                // Generate an extension class that extends the above enums with
-                // methods that accesses their backing value
-                WriteGeneratedCodeAttribute();
-                WriteLine($"internal static class {variablesClassName}TypeExtensions {{");
-                indentLevel += 1;
-                foreach (var enumType in enumTypes)
-                {
-                    var backingType = enumType.RawType == Types.Number ? "int" : "string";
-                    WriteLine($"internal static {backingType} GetBackingValue(this {enumType.Name} enumValue) {{");
-                    indentLevel += 1;
-                    WriteLine($"switch (enumValue) {{");
-                    indentLevel += 1;
-
-                    foreach (var @case in enumType.EnumCases)
-                    {
-                        WriteLine($"case {enumType.Name}.{@case.Key}:", 1);
-                        if (enumType.RawType == Types.Number)
-                        {
-
-                            WriteLine($"return {@case.Value.Value};", 2);
-                        }
-                        else if (enumType.RawType == Types.String)
-                        {
-                            WriteLine($"return \"{@case.Value.Value}\";", 2);
-                        }
-                        else
-                        {
-                            throw new System.ArgumentException($"Invalid Yarn enum raw type {enumType.RawType}");
-                        }
-                    }
-                    WriteLine("default:", 1);
-                    WriteLine("throw new System.ArgumentException($\"{enumValue} is not a valid enum case.\");");
-
-                    indentLevel -= 1;
-                    WriteLine("}");
-                    indentLevel -= 1;
-                    WriteLine("}");
-                }
-                indentLevel -= 1;
-                WriteLine("}");
-            }
-
-            WriteGeneratedCodeAttribute();
-            WriteLine($"public partial class {variablesClassName} : {variablesClassParent}, Yarn.Unity.IGeneratedVariableStorage {{");
-
-            indentLevel += 1;
-
-            var declarationsToGenerate = compilationResult.Declarations
-                .Where(d => d.IsVariable == true)
-                .Where(d => d.Name.StartsWith("$Yarn.Internal") == false);
-
-            if (declarationsToGenerate.Count() == 0)
-            {
-                WriteComment("This yarn project does not declare any variables.");
-            }
-
-            foreach (var decl in declarationsToGenerate)
-            {
-                string? cSharpTypeName = null;
-
-                if (decl.Type == Yarn.Types.String)
-                {
-                    cSharpTypeName = "string";
-                }
-                else if (decl.Type == Yarn.Types.Number)
-                {
-                    cSharpTypeName = "float";
-                }
-                else if (decl.Type == Yarn.Types.Boolean)
-                {
-                    cSharpTypeName = "bool";
-                }
-                else if (decl.Type is EnumType enumType1)
-                {
-                    cSharpTypeName = enumType1.Name;
-                }
-                else
-                {
-                    WriteLine($"#warning Can't generate a property for variable {decl.Name}, because its type ({decl.Type}) can't be handled.");
-                    WriteLine();
-                }
-
-
-                WriteComment($"Accessor for {decl.Type} {decl.Name}");
-
-                // Remove '$'
-                string cSharpVariableName = decl.Name.TrimStart('$');
-
-                // Convert snake_case to CamelCase
-                cSharpVariableName = SnakeCaseToCamelCase.Replace(cSharpVariableName, (match) =>
-                {
-                    return match.Groups[2].Value.ToUpperInvariant();
-                });
-
-                // Capitalise first letter
-                cSharpVariableName = cSharpVariableName.Substring(0, 1).ToUpperInvariant() + cSharpVariableName.Substring(1);
-
-                if (decl.Description != null)
-                {
-                    WriteLine("/// <summary>");
-                    WriteLine($"/// {decl.Description}");
-                    WriteLine("/// </summary>");
-                }
-
-                WriteLine($"public {cSharpTypeName} {cSharpVariableName} {{");
-
-                indentLevel += 1;
-
-                if (decl.Type is EnumType enumType)
-                {
-                    WriteLine($"get => this.GetEnumValueOrDefault<{cSharpTypeName}>(\"{decl.Name}\");");
-                }
-                else
-                {
-                    WriteLine($"get => this.GetValueOrDefault<{cSharpTypeName}>(\"{decl.Name}\");");
-                }
-
-                if (decl.IsInlineExpansion == false)
-                {
-                    // Only generate a setter if it's a variable that can be modified
-                    if (decl.Type is EnumType e)
-                    {
-                        WriteLine($"set => this.SetValue(\"{decl.Name}\", value.GetBackingValue());");
-                    }
-                    else
-                    {
-                        WriteLine($"set => this.SetValue<{cSharpTypeName}>(\"{decl.Name}\", value);");
-                    }
-                }
-                indentLevel -= 1;
-
-                WriteLine($"}}");
-
-                WriteLine();
-            }
-
-            indentLevel -= 1;
-
-            WriteLine($"}}");
-
-            if (string.IsNullOrEmpty(variablesClassNamespace) == false)
-            {
-                indentLevel -= 1;
-                WriteLine($"}}");
-            }
-
-            if (existingContent != null && existingContent.Equals(sb.ToString(), System.StringComparison.Ordinal))
-            {
-                // What we generated is identical to what's already on disk.
-                // Don't write it.
-                return false;
-            }
-
-            Debug.Log($"Writing to {outputPath}");
-            File.WriteAllText(outputPath, sb.ToString());
-
-            return true;
 
         }
 
-        /// <summary>
-        /// Checks if the modifications on the Asset Database will necessitate a
-        /// reimport of the project to stay in sync with the localisation
-        /// assets.
-        /// </summary>
-        /// <remarks>
-        /// Because assets can be added and removed after associating a folder
-        /// of assets with a locale, modifications won't be detected until
-        /// runtime when they cause an error. This is bad for many reasons, so
-        /// this method will check any modified assets and see if they
-        /// correspond to this Yarn Project. If they do, it will reimport the
-        /// project to reassociate them.
-        /// </remarks>
-        /// <param name="modifiedAssetPaths">The list of asset paths that have
-        /// been modified; that is to say, assets that have been added, removed,
-        /// or moved.</param>
-        public void CheckUpdatedAssetsRequireReimport(List<string> modifiedAssetPaths)
-        {
-            // Use an inner method that can return early if it detects that an
-            // asset has been modified.
-            bool IsAnyAssetModified()
-            {
-                if (ImportData == null)
-                {
-                    // We don't have any information we can use to determine whether
-                    // we need to re-import or not. Assume that we need to.
-                    return true;
-                }
-                var localeAssetFolderPaths = ImportData.localizations.Where(l => l.assetsFolder != null).Select(l => AssetDatabase.GetAssetPath(l.assetsFolder));
-
-                var comparison = System.StringComparison.CurrentCulture;
-                if (Application.platform == RuntimePlatform.WindowsPlayer || Application.platform == RuntimePlatform.WindowsEditor)
-                {
-                    comparison = System.StringComparison.OrdinalIgnoreCase;
-                }
-                foreach (var path in localeAssetFolderPaths)
-                {
-                    // we need to ensure we have the trailing seperator otherwise it is to be considered a file
-                    // and files can never be the parent of another file
-                    var assetPath = path;
-                    if (!path.EndsWith(Path.DirectorySeparatorChar.ToString()))
-                    {
-                        assetPath += Path.DirectorySeparatorChar.ToString();
-                    }
-
-                    foreach (var modified in modifiedAssetPaths)
-                    {
-                        if (modified.StartsWith(assetPath, comparison))
-                        {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-
-            if (IsAnyAssetModified())
-            {
-                AssetDatabase.ImportAsset(this.assetPath);
-            }
-        }
-
-        internal static string GetRelativePath(string path)
-        {
-            if (path.StartsWith(UnityProjectRootPath) == false)
-            {
-                // This is not a child of the current project. If it's an
-                // absolute path, then it's enough to go on.
-                if (Path.IsPathRooted(path))
-                {
-                    return path;
-                }
-                else
-                {
-                    throw new System.ArgumentException($"Path {path} is not a child of the project root path {UnityProjectRootPath}");
-                }
-            }
-            // Trim the root path off along with the trailing slash
-            return path.Substring(UnityProjectRootPath.Length + 1);
-        }
-
-        private void CreateYarnInternalLocalizationAssets(AssetImportContext ctx, YarnProject projectAsset, CompilationResult compilationResult, ProjectImportData importData)
+        private void CreateYarnInternalLocalizationAssets(AssetImportContext ctx, YarnProject project, CompilationResult compilationResult)
         {
             // Will we need to create a default localization? This variable
             // will be set to false if any of the languages we've
@@ -1019,158 +364,138 @@ namespace Yarn.Unity.Editor
             // language.
             var shouldAddDefaultLocalization = true;
 
-            foreach (var localisationInfo in importData.localizations)
+            foreach (var pair in languagesToSourceAssets)
             {
-                if (localisationInfo.isExternal)
-                {
-                    // Don't need to create a localization asset because an
-                    // external asset was provided
-                    continue;
-                }
-
                 // Don't create a localization if the language ID was not
                 // provided
-                if (string.IsNullOrEmpty(localisationInfo.languageID))
+                if (string.IsNullOrEmpty(pair.languageID))
                 {
-                    Debug.LogWarning($"Not creating a localization for {projectAsset.name} because the language ID wasn't provided.");
+                    Debug.LogWarning($"Not creating a localization for {project.name} because the language ID wasn't provided. Add the language ID to the localization in the Yarn Project's inspector.");
                     continue;
                 }
 
-                IEnumerable<StringTableEntry>? stringTable;
+                IEnumerable<StringTableEntry> stringTable;
 
                 // Where do we get our strings from? If it's the default
                 // language, we'll pull it from the scripts. If it's from
                 // any other source, we'll pull it from the CSVs.
-                if (localisationInfo.languageID == importData.baseLanguageName)
+                if (pair.languageID == defaultLanguage)
                 {
-                    // No strings file needed - we'll use the program-supplied string table.
-                    stringTable = GenerateStringsTable(compilationResult);
+                    // We'll use the program-supplied string table.
+                    stringTable = GenerateStringsTable();
 
                     // We don't need to add a default localization.
                     shouldAddDefaultLocalization = false;
                 }
                 else
                 {
-                    // No strings file provided
-                    if (localisationInfo.stringsFile == null)
-                    {
-                        Debug.LogWarning($"Not creating a localisation for {localisationInfo.languageID} in the Yarn project {projectAsset.name} because a strings file was not specified, and {localisationInfo.languageID} is not the project's base language");
-                        continue;
-                    }
                     try
                     {
-                        stringTable = StringTableEntry.ParseFromCSV(localisationInfo.stringsFile.text);
+                        if (pair.stringsFile == null)
+                        {
+                            // We can't create this localization because we
+                            // don't have any data for it.
+                            Debug.LogWarning($"Not creating a localization for {pair.languageID} in the Yarn Project {project.name} because a text asset containing the strings wasn't found. Add a .csv file containing the translated lines to the Yarn Project's inspector.");
+                            continue;
+                        }
+
+                        stringTable = StringTableEntry.ParseFromCSV(pair.stringsFile.text);
                     }
                     catch (System.ArgumentException e)
                     {
-                        Debug.LogWarning($"Not creating a localization for {localisationInfo.languageID} in the Yarn Project {projectAsset.name} because an error was encountered during text parsing: {e}");
+                        Debug.LogWarning($"Not creating a localization for {pair.languageID} in the Yarn Project {project.name} because an error was encountered during text parsing: {e}");
                         continue;
                     }
                 }
 
                 var newLocalization = ScriptableObject.CreateInstance<Localization>();
+                newLocalization.LocaleCode = pair.languageID;
 
-                if (stringTable != null)
-                {
-                    // Add these new lines to the localisation's asset
-                    foreach (var entry in stringTable)
-                    {
-                        newLocalization.AddLocalisedStringToAsset(entry.ID, entry.Text ?? string.Empty);
-                    }
+                // Add these new lines to the localisation's asset
+                foreach (var entry in stringTable) {
+                    newLocalization.AddLocalisedStringToAsset(entry.ID, entry.Text);
                 }
 
-                projectAsset.localizations.Add(localisationInfo.languageID, newLocalization);
-                newLocalization.name = localisationInfo.languageID;
 
-                if (localisationInfo.assetsFolder != null)
+                project.localizations.Add(newLocalization);
+                newLocalization.name = pair.languageID;
+
+                if (pair.assetsFolder != null)
                 {
+                    var assetsFolderPath = AssetDatabase.GetAssetPath(pair.assetsFolder);
+
+                    if (assetsFolderPath == null)
+                    {
+                        // This was somehow not a valid reference?
+                        Debug.LogWarning($"Can't find assets for localization {pair.languageID} in {project.name} because a path for the provided assets folder couldn't be found.");
+                    }
+                    else
+                    {
+                        newLocalization.ContainsLocalizedAssets = true;
+
 #if USE_ADDRESSABLES
-                    const bool addressablesAvailable = true;
+                        const bool addressablesAvailable = true;
 #else
-                    const bool addressablesAvailable = false;
+                        const bool addressablesAvailable = false;
 #endif
 
-                    if (addressablesAvailable && useAddressableAssets)
-                    {
-                        newLocalization.UsesAddressableAssets = true;
-                    }
-
-                    // We need to find the assets used by this
-                    // localization now, and assign them to the
-                    // Localization object.
-#if YARNSPINNER_DEBUG
-                    // This can take some time, so we'll measure
-                    // how long it takes.
-                    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-#endif
-
-                    // Get the line IDs.
-                    IEnumerable<string> lineIDs = stringTable.Select(s => s.ID);
-
-                    // Map each line ID to its asset path.
-                    var stringIDsToAssetPaths = YarnProjectUtility.FindAssetPathsForLineIDs(lineIDs, AssetDatabase.GetAssetPath(localisationInfo.assetsFolder), typeof(UnityEngine.Object));
-
-                    // Load the asset, so we can assign the reference.
-                    var assetPaths = stringIDsToAssetPaths
-                        .Select(a => new KeyValuePair<string, Object>(a.Key, AssetDatabase.LoadAssetAtPath<Object>(a.Value)));
-
-                    foreach (var (id, asset) in assetPaths)
-                    {
-                        newLocalization.AddLocalizedObjectToAsset(id, asset);
-                    }
-
-#if USE_ADDRESSABLES
-                    // If we're using addressable assets, make sure that the
-                    // assets we just added have an address. Do this after the
-                    // import completes, because we're not allowed to modify the
-                    // addressable asset settings in the middle of an import.
-                    if (newLocalization.UsesAddressableAssets)
-                    {
-                        EditorApplication.delayCall += () =>
+                        if (addressablesAvailable && useAddressableAssets)
                         {
-                            var assetCount = assetPaths.Count();
-                            int count = 0;
-
-                            foreach (var (id, asset) in assetPaths)
-                            {
-                                // Updating asset addresses can take time, so
-                                // show a progress bar that the user can cancel.
-                                var cancelled = EditorUtility.DisplayCancelableProgressBar("Updating Dialogue Asset Addresses", asset.name, count / (float)assetCount);
-                                if (cancelled)
-                                {
-                                    Debug.LogWarning("Cancelled updating dialogue asset paths.");
-                                    break;
-                                }
-                                LocalizationEditor.EnsureAssetIsAddressable(asset, Localization.GetAddressForLine(id, localisationInfo.languageID));
-                                count += 1;
-                            }
-                            EditorUtility.ClearProgressBar();
-                        };
-                    }
+                            // We only need to flag that the assets
+                            // required by this localization are accessed
+                            // via the Addressables system. (Call
+                            // YarnProjectUtility.UpdateAssetAddresses to
+                            // ensure that the appropriate assets have the
+                            // appropriate addresses.)
+                            newLocalization.UsesAddressableAssets = true;
+                        }
+                        else
+                        {
+                            // We need to find the assets used by this
+                            // localization now, and assign them to the
+                            // Localization object.
+#if YARNSPINNER_DEBUG
+                            // This can take some time, so we'll measure
+                            // how long it takes.
+                            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 #endif
+
+                            // Get the line IDs.
+                            IEnumerable<string> lineIDs = stringTable.Select(s => s.ID);
+
+                            // Map each line ID to its asset path.
+                            var stringIDsToAssetPaths = YarnProjectUtility.FindAssetPathsForLineIDs(lineIDs, assetsFolderPath);
+
+                            // Load the asset, so we can assign the reference.
+                            var assetPaths = stringIDsToAssetPaths
+                                .Select(a => new KeyValuePair<string, Object>(a.Key, AssetDatabase.LoadAssetAtPath<Object>(a.Value)));
+
+                            newLocalization.AddLocalizedObjects(assetPaths);
 
 #if YARNSPINNER_DEBUG
-                    stopwatch.Stop();
-                    Debug.Log($"Imported {stringIDsToAssetPaths.Count()} assets for {project.name} \"{pair.languageID}\" in {stopwatch.ElapsedMilliseconds}ms");
+                            stopwatch.Stop();
+                            Debug.Log($"Imported {stringIDsToAssetPaths.Count()} assets for {project.name} \"{pair.languageID}\" in {stopwatch.ElapsedMilliseconds}ms");
 #endif
+                        }
+                    }
                 }
 
-                ctx.AddObjectToAsset("localization-" + localisationInfo.languageID, newLocalization);
+                ctx.AddObjectToAsset("localization-" + pair.languageID, newLocalization);
 
-                if (localisationInfo.languageID == importData.baseLanguageName)
+                if (pair.languageID == defaultLanguage)
                 {
                     // If this is our default language, set it as such
-                    projectAsset.baseLocalization = newLocalization;
+                    project.baseLocalization = newLocalization;
 
                     // Since this is the default language, also populate the line metadata.
-                    projectAsset.lineMetadata = new LineMetadata(LineMetadataTableEntriesFromCompilationResult(compilationResult));
+                    project.lineMetadata = new LineMetadata(LineMetadataTableEntriesFromCompilationResult(compilationResult));
                 }
-                else if (localisationInfo.stringsFile != null)
+                else
                 {
                     // This localization depends upon a source asset. Make
                     // this asset get re-imported if this source asset was
                     // modified
-                    ctx.DependsOnSourceAsset(AssetDatabase.GetAssetPath(localisationInfo.stringsFile));
+                    ctx.DependsOnSourceAsset(AssetDatabase.GetAssetPath(pair.stringsFile));
                 }
             }
 
@@ -1181,166 +506,137 @@ namespace Yarn.Unity.Editor
                 var stringTableEntries = GetStringTableEntries(compilationResult);
 
                 var developmentLocalization = ScriptableObject.CreateInstance<Localization>();
-                developmentLocalization.name = $"Default ({importData.baseLanguageName})";
+                developmentLocalization.name = $"Default ({defaultLanguage})";
+                developmentLocalization.LocaleCode = defaultLanguage;
 
 
                 // Add these new lines to the development localisation's asset
                 foreach (var entry in stringTableEntries)
                 {
-                    developmentLocalization.AddLocalisedStringToAsset(entry.ID, entry.Text ?? string.Empty);
+                    developmentLocalization.AddLocalisedStringToAsset(entry.ID, entry.Text);
                 }
 
-                projectAsset.baseLocalization = developmentLocalization;
-                projectAsset.localizations.Add(importData.baseLanguageName ?? developmentLocalization.name, projectAsset.baseLocalization);
+                project.baseLocalization = developmentLocalization;
+                project.localizations.Add(project.baseLocalization);
                 ctx.AddObjectToAsset("default-language", developmentLocalization);
 
                 // Since this is the default language, also populate the line metadata.
-                projectAsset.lineMetadata = new LineMetadata(LineMetadataTableEntriesFromCompilationResult(compilationResult));
-            }
-
-            foreach (var locInfo in importData.localizations.Where(l => l.isExternal && l.externalLocalization != null))
-            {
-                // Add external localisations to this project's list
-                projectAsset.localizations.Add(locInfo.languageID, locInfo.externalLocalization!);
+                project.lineMetadata = new LineMetadata(LineMetadataTableEntriesFromCompilationResult(compilationResult));
             }
         }
 
-#if USE_UNITY_LOCALIZATION
-        private static void AddStringTableEntries(IDictionary<string, StringInfo> stringTable, StringTableCollection unityLocalisationStringTableCollection, string baseLanguage)
+#if USE_UNITY_LOCALIZATION && YARN_ENABLE_EXPERIMENTAL_FEATURES
+        private void AddStringTableEntries(CompilationResult compilationResult, StringTableCollection unityLocalisationStringTableCollection)
         {
-            if (LocalizationEditorSettings.ActiveLocalizationSettings == null)
+            if (unityLocalisationStringTableCollection == null)
             {
-                // No localization settings available. We can't add string table entries.
-                Debug.LogWarning($"Unity Localization is installed, but your project has no Localization Settings.");
+                Debug.LogError("Unable to generate String Table Entries as the string collection is null");
                 return;
             }
 
-            // Get the Unity string table corresponding to the Yarn Project's
-            // base language. If a table can't be found for the language but can
-            // be for the language's parent, use that. Otherwise, return null.
-            StringTable? FindBaseLanguageStringTable(string baseLanguage)
+            var defaultCulture = new System.Globalization.CultureInfo(defaultLanguage);
+
+            foreach (var table in unityLocalisationStringTableCollection.StringTables)
             {
-                StringTable baseLanguageStringTable = unityLocalisationStringTableCollection.StringTables
-                    .FirstOrDefault(t => t.LocaleIdentifier == baseLanguage);
-
-                if (baseLanguageStringTable != null)
+                if (table.LocaleIdentifier.CultureInfo != defaultCulture)
                 {
-                    return baseLanguageStringTable;
+                    var neutralTable = table.LocaleIdentifier.CultureInfo.IsNeutralCulture ? table.LocaleIdentifier.CultureInfo : table.LocaleIdentifier.CultureInfo.Parent;
+                    var defaultNeutral = defaultCulture.IsNeutralCulture ? defaultCulture : defaultCulture.Parent;
+
+                    if (!neutralTable.Equals(defaultNeutral))
+                    {
+                        continue;
+                    }
                 }
 
-                // We didn't find a string table that exactly matches the locale
-                // code of our Yarn Project's base language. Maybe we can try to
-                // find a string table for our base language's parent.
-
-                System.Globalization.CultureInfo? defaultCulture = null;
-                try
+                foreach (var entry in compilationResult.StringTable)
                 {
-                    defaultCulture = new System.Globalization.CultureInfo(baseLanguage);
-                }
-                catch (System.Globalization.CultureNotFoundException)
-                {
-                    // We can't find a CultureInfo for the base language.
-                    return null;
-                }
+                    var lineID = entry.Key;
+                    var stringInfo = entry.Value;
 
-                if (defaultCulture.IsNeutralCulture)
-                {
-                    // The base language is a neutral culture. It has no parent
-                    // we could look for.
-                    return null;
-                }
+                    var lineEntry = table.AddEntry(lineID, stringInfo.text);
 
-                var defaultNeutralCulture = defaultCulture.Parent;
+                    var existingMetadata = lineEntry.GetMetadata<UnityLocalization.LineMetadata>();
 
-                var defaultNeutralStringTable = unityLocalisationStringTableCollection.StringTables.FirstOrDefault(table => table.LocaleIdentifier == defaultNeutralCulture.Name);
+                    if (existingMetadata != null) {
+                        lineEntry.RemoveMetadata(existingMetadata);
+                    }
 
-                return defaultNeutralStringTable;
-            }
-
-            var unityStringTable = FindBaseLanguageStringTable(baseLanguage);
-
-            if (unityStringTable == null)
-            {
-                Debug.LogWarning($"Unable to find a locale in the string table that matches the default locale {baseLanguage}");
-                return;
-            }
-
-            foreach (var yarnEntry in stringTable)
-            {
-                // Grab the data that we'll put in the string table
-                var lineID = yarnEntry.Key;
-                var stringInfo = yarnEntry.Value;
-
-                // Do we already have an entry with this line ID?
-                UnityEngine.Localization.Tables.StringTableEntry unityEntry = unityStringTable.GetEntry(lineID);
-
-                if (unityEntry != null)
-                {
-                    // We have an existing entry, so update it.
-                    unityEntry.Value = stringInfo.text;
-                }
-                else
-                {
-                    // Create a new entry for this content.
-                    unityEntry = unityStringTable.AddEntry(lineID, stringInfo.text);
-                }
-
-                // Next, set up the metadata on this entry. We'll start by
-                // getting the list of hashtags on the line, not including its
-                // line ID (we don't need it in metadata, because it's already
-                // stored as the table entry's key.)
-                var tags = RemoveLineIDFromMetadata(stringInfo.metadata).ToArray();
-
-                // Next, do we already have metadata for the Unity table entry?
-                var existingSharedMetadata = unityEntry.SharedEntry.Metadata.GetMetadata<UnityLocalization.LineMetadata>();
-
-                if (existingSharedMetadata != null)
-                {
-                    // We do. Update the existing metadata.
-                    existingSharedMetadata.nodeName = stringInfo.nodeName;
-                    existingSharedMetadata.tags = tags;
-                }
-                else
-                {
-                    // Create a new metadata.
-                    unityEntry.SharedEntry.Metadata.AddMetadata(new UnityLocalization.LineMetadata
+                    lineEntry.AddMetadata(new UnityLocalization.LineMetadata
                     {
                         nodeName = stringInfo.nodeName,
-                        tags = tags,
+                        tags = RemoveLineIDFromMetadata(stringInfo.metadata).ToArray(),
                     });
                 }
+                return;
             }
-
-            // We've made changes to the table, so flag it and its shared data
-            // as dirty.
-            EditorUtility.SetDirty(unityStringTable);
-            EditorUtility.SetDirty(unityStringTable.SharedData);
-            EditorUtility.SetDirty(unityLocalisationStringTableCollection);
-            EditorUtility.SetDirty(LocalizationEditorSettings.ActiveLocalizationSettings);
-            return;
-
+            Debug.LogWarning($"Unable to find a locale in the string table that matches the default locale {defaultLanguage}");
         }
 #endif
 
-        /// <summary>
-        /// Gets a value indicating whether this Yarn Project contains any
-        /// compile errors.
-        /// </summary>
-        internal bool HasErrors
+        private List<string> AssemblySearchList()
         {
-            get
-            {
-                var importData = AssetDatabase.LoadAssetAtPath<ProjectImportData>(this.assetPath);
+            // Get the list of assembly names we want to search for actions in.
+            IEnumerable<AssemblyDefinitionAsset> assembliesToSearch = this.assembliesToSearch;
 
-                if (importData == null)
-                {
-                    // If we have no import data, then a problem has occurred
-                    // when importing this project, so indicate 'true' as
-                    // signal.
-                    return true;
-                }
-                return importData.HasCompileErrors;
+            if (searchAllAssembliesForActions) 
+            {
+                // We're searching all assemblies for actions. Find all assembly
+                // definitions in the project, including in packages, and load
+                // them.
+                assembliesToSearch = AssetDatabase
+                    .FindAssets($"t:{nameof(AssemblyDefinitionAsset)}")
+                    .Select(guid => AssetDatabase.GUIDToAssetPath(guid))
+                    .Distinct()
+                    .Select(path => AssetDatabase.LoadAssetAtPath<AssemblyDefinitionAsset>(path));
             }
+
+            // We won't include any assemblies whose names begin with any of
+            // these prefixes
+            var excludedPrefixes = new[] {
+                "Unity",
+            };
+
+            // Go through each assembly definition asset, figure out its
+            // assembly name, and add it to the project's list of assembly names
+            // to search.
+            var validAssemblies = new List<string>();
+            foreach (var reference in assembliesToSearch) 
+            {
+                if (reference == null)
+                {
+                    continue;
+                }
+                var data = new AssemblyDefinition();
+                EditorJsonUtility.FromJsonOverwrite(reference.text, data);
+
+                if (excludedPrefixes.Any(prefix => data.name.StartsWith(prefix))) 
+                {
+                    continue;
+                }
+
+                validAssemblies.Add(data.name);
+            }
+            return validAssemblies;
+        }
+
+        private List<FunctionInfo> predeterminedFunctions()
+        {
+            var functions = ActionManager.FunctionsInfo();
+
+            List<FunctionInfo> f = new List<FunctionInfo>();
+            foreach(var func in functions)
+            {
+                f.Add(FunctionInfo.CreateFunctionInfoFromMethodGroup(func));
+            }
+            return f;
+        }
+
+        // A data class used for deserialising the JSON AssemblyDefinitionAssets
+        // into.
+        [System.Serializable]
+        private class AssemblyDefinition {
+            public string name;
         }
 
         /// <summary>
@@ -1350,56 +646,62 @@ namespace Yarn.Unity.Editor
         /// </summary>
         /// <inheritdoc path="exception"
         /// cref="GetScriptHasLineTags(TextAsset)"/>
-        internal bool CanGenerateStringsTable
+        internal bool CanGenerateStringsTable => this.compileErrors.Count == 0 && sourceScripts.Count > 0 && sourceScripts.All(s => GetScriptHasLineTags(s));
+
+        /// <summary>
+        /// Gets a value indicating whether the source script has line
+        /// tags.
+        /// </summary>
+        /// <param name="script">The source script to add. This script must
+        /// have been imported by a <see cref="YarnImporter"/>.</param>
+        /// <returns>
+        /// <see langword="true"/> if the the script is fully tagged, <see
+        /// langword="false"/> otherwise.
+        /// </returns>
+        /// <exception cref="System.ArgumentNullException">
+        /// Thrown when <paramref name="script"/> is <see
+        /// langword="null"/>.
+        /// </exception>
+        /// <exception cref="System.ArgumentException">
+        /// Thrown when <paramref name="script"/> is not imported by a <see
+        /// cref="YarnImporter"/>.
+        /// </exception>
+        private bool GetScriptHasLineTags(TextAsset script)
         {
-            get
+            if (script == null)
             {
-                var importData = AssetDatabase.LoadAssetAtPath<ProjectImportData>(this.assetPath);
-
-                if (importData == null)
-                {
-                    return false;
-                }
-
-                return importData.HasCompileErrors == false && importData.containsImplicitLineIDs == false;
+                // This might be a 'None' or 'Missing' asset, so return
+                // false here.
+                return false;
             }
+
+            // Get the importer for this TextAsset
+            var importer = AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(script)) as YarnImporter;
+
+            if (importer == null)
+            {
+                throw new System.ArgumentException($"The asset {script} is not imported via a {nameof(YarnImporter)}");
+            }
+
+            // Did it have any implicit string IDs when it was imported?
+            return importer.LastImportHadImplicitStringIDs == false;
         }
 
-        internal CompilationJob GetCompilationJob()
+        private CompilationResult? CompileStringsOnly()
         {
-            var project = GetProject();
+            var pathsToImporters = sourceScripts.Where(s => s != null).Select(s => AssetDatabase.GetAssetPath(s));
 
-            if (project == null)
+            if (pathsToImporters.Count() == 0)
             {
-                return default;
+                // We have no scripts to work with.
+                return null;
             }
 
-            return CompilationJob.CreateFromFiles(project.SourceFiles);
-        }
-
-        internal IEnumerable<string> GetErrorsForScript(TextAsset sourceScript)
-        {
-            if (ImportData == null)
-            {
-                return Enumerable.Empty<string>();
-            }
-            foreach (var errorCollection in ImportData.diagnostics)
-            {
-                if (errorCollection.yarnFile == sourceScript)
-                {
-                    return errorCollection.errorMessages;
-                }
-            }
-            return Enumerable.Empty<string>();
-        }
-
-        internal IEnumerable<StringTableEntry>? GenerateStringsTable()
-        {
-            var job = GetCompilationJob();
+            // We now now compile!
+            var job = CompilationJob.CreateFromFiles(pathsToImporters);
             job.CompilationType = CompilationJob.Type.StringsOnly;
-            var result = Compiler.Compiler.Compile(job);
-            return GenerateStringsTable(result);
 
+            return Compiler.Compiler.Compile(job);
         }
 
         /// <summary>
@@ -1410,9 +712,11 @@ namespace Yarn.Unity.Editor
         /// cref="StringTableEntry"/> for each of the lines in the Yarn
         /// Project, or <see langword="null"/> if the Yarn Project contains
         /// errors.</returns>
-        internal IEnumerable<StringTableEntry>? GenerateStringsTable(CompilationResult compilationResult)
+        internal IEnumerable<StringTableEntry> GenerateStringsTable()
         {
-            if (compilationResult == null)
+            CompilationResult? compilationResult = CompileStringsOnly();
+
+            if (!compilationResult.HasValue)
             {
                 // We only get no value if we have no scripts to work with.
                 // In this case, return an empty collection - there's no
@@ -1420,7 +724,7 @@ namespace Yarn.Unity.Editor
                 return new List<StringTableEntry>();
             }
 
-            var errors = compilationResult.Diagnostics.Where(d => d.Severity == Diagnostic.DiagnosticSeverity.Error);
+            var errors = compilationResult.Value.Diagnostics.Where(d => d.Severity == Diagnostic.DiagnosticSeverity.Error);
 
             if (errors.Count() > 0)
             {
@@ -1428,25 +732,22 @@ namespace Yarn.Unity.Editor
                 return null;
             }
 
-            return GetStringTableEntries(compilationResult);
+            return GetStringTableEntries(compilationResult.Value);
         }
 
-        internal IEnumerable<LineMetadataTableEntry>? GenerateLineMetadataEntries()
+        internal IEnumerable<LineMetadataTableEntry> GenerateLineMetadataEntries()
         {
-            CompilationJob compilationJob = GetCompilationJob();
+            CompilationResult? compilationResult = CompileStringsOnly();
 
-            if (compilationJob.Inputs.Any() == false)
+            if (!compilationResult.HasValue)
             {
-                // We have no scripts to work with. In this case, return an
-                // empty collection - there's no error, but there's no content
-                // either.
+                // We only get no value if we have no scripts to work with.
+                // In this case, return an empty collection - there's no
+                // error, but there's no content either.
                 return new List<LineMetadataTableEntry>();
             }
-            compilationJob.CompilationType = CompilationJob.Type.StringsOnly;
 
-            CompilationResult compilationResult = Compiler.Compiler.Compile(compilationJob);
-
-            var errors = compilationResult.Diagnostics.Where(d => d.Severity == Diagnostic.DiagnosticSeverity.Error);
+            var errors = compilationResult.Value.Diagnostics.Where(d => d.Severity == Diagnostic.DiagnosticSeverity.Error);
 
             if (errors.Count() > 0)
             {
@@ -1454,23 +755,21 @@ namespace Yarn.Unity.Editor
                 return null;
             }
 
-            return LineMetadataTableEntriesFromCompilationResult(compilationResult);
+            return LineMetadataTableEntriesFromCompilationResult(compilationResult.Value);
         }
 
         private IEnumerable<StringTableEntry> GetStringTableEntries(CompilationResult result)
         {
-
-            var linesWithContent = result.StringTable.Where(s => s.Value.text != null);
-
-            return linesWithContent.Select(x => new StringTableEntry
+            
+            return result.StringTable.Select(x => new StringTableEntry
             {
                 ID = x.Key,
-                Language = GetProject()?.BaseLanguage ?? "<unknown language>",
+                Language = defaultLanguage,
                 Text = x.Value.text,
                 File = x.Value.fileName,
                 Node = x.Value.nodeName,
                 LineNumber = x.Value.lineNumber.ToString(),
-                Lock = YarnImporter.GetHashString(x.Value.text!, 8),
+                Lock = YarnImporter.GetHashString(x.Value.text, 8),
                 Comment = GenerateCommentWithLineMetadata(x.Value.metadata),
             });
         }
@@ -1518,156 +817,594 @@ namespace Yarn.Unity.Editor
         /// </summary>
         /// <param name="metadata">The array with line metadata.</param>
         /// <returns>An IEnumerable with any line ID entries removed.</returns>
-        private static IEnumerable<string> RemoveLineIDFromMetadata(string[] metadata)
+        private IEnumerable<string> RemoveLineIDFromMetadata(string[] metadata)
         {
             return metadata.Where(x => !x.StartsWith("line:"));
         }
-
-#if USE_UNITY_LOCALIZATION
-        /// <summary>
-        /// Attempts to populate the <see cref="StringTableCollection"/>
-        /// associated with this Yarn Project Importer using strings found in
-        /// the project's Yarn scripts.
-        /// </summary>
-        /// <exception cref="System.InvalidOperationException">Thrown when <see
-        /// cref="UseUnityLocalisationSystem"/> is <see
-        /// langword="false"/>.</exception>
-        internal void AddStringsToUnityLocalization()
-        {
-            if (UseUnityLocalisationSystem == false)
-            {
-                throw new System.InvalidOperationException($"Can't add strings to Unity Localization: project {assetPath} does not use Unity Localization.");
-            }
-
-            // Get the Yarn string table from the project
-            Dictionary<string, StringInfo>? table = GetYarnStringTable();
-
-            if (table == null || ImportData == null)
-            {
-                // No lines available, or importer has not successfully imported
-                return;
-            }
-
-            // Get the string table collection from the importer
-            StringTableCollection? tableCollection = UnityLocalisationStringTableCollection;
-
-            if (tableCollection == null)
-            {
-                Debug.LogError("Unable to generate String Table Entries as the string collection is null", (YarnProjectImporter?)this);
-                return;
-            }
-
-            if (ImportData.baseLanguageName == null)
-            {
-                Debug.LogError($"Unable to generate String Table Entries as the Yarn Project's {nameof(ImportData.baseLanguageName)} is null", (YarnProjectImporter?)this);
-                return;
-            }
-
-            // Populate the string table collection from the Yarn strings
-            AddStringTableEntries(table, tableCollection, ImportData.baseLanguageName);
-        }
-#endif
-
-        /// <summary>
-        /// A placeholder string that may be used in Yarn Project files that
-        /// represents the root path of the Unity project (that is, the
-        /// directory containing the Assets folder).
-        /// </summary>
-        public const string UnityProjectRootVariable = "${UnityProjectRoot}";
     }
 
-    /// <summary>
-    /// Contains extension methods for <see cref="Project"/> objects.
-    /// </summary>
-    public static class ProjectExtensions
+    public class ReorderableDeclarationsList
     {
-        /// <summary>
-        /// Gets the path, relative to the project's location on disk, to the
-        /// strings location associated with the given language code.
-        /// </summary>
-        /// <param name="project">The project to fetch path information
-        /// for.</param>
-        /// <param name="languageCode">A BCP-47 locale code.</param>
-        /// <param name="fullStringsPath">On return, the relative path from
-        /// <paramref name="project"/>'s location on disk to the specified
-        /// locale's strings location, or <see langword="null"/> if it couldn't be
-        /// found.</param>
-        /// <returns><see langword="true"/> if the strings location could be found
-        /// for the given language code; <see langword="false"/>
-        /// otherwise.</returns>
-        public static bool TryGetStringsPath(this Yarn.Compiler.Project project, string languageCode, out string? fullStringsPath)
+        private struct Problem
         {
-            if (project.Localisation.TryGetValue(languageCode, out var info) == false)
-            {
-                fullStringsPath = default;
-                return false;
-            }
-            if (string.IsNullOrEmpty(info.Strings))
-            {
-                fullStringsPath = default;
-                return false;
-            }
-
-            var projectFolderRelative = Path.GetDirectoryName(project.Path);
-            var projectFolderAbsolute = Path.GetFullPath(Path.Combine(YarnProjectImporter.UnityProjectRootPath, projectFolderRelative));
-
-            // am force unwrapping the strings due to a bug
-            // the IsNullOrEmpty check on this version of dotnet doesn't propogate it's understanding that the value isn't null
-            // in a future version this will go away as a concern.
-            var expandedPath = info.Strings!.Replace(YarnProjectImporter.UnityProjectRootVariable, YarnProjectImporter.UnityProjectRootPath);
-
-            if (Path.IsPathRooted(expandedPath) == false)
-            {
-                expandedPath = Path.GetFullPath(Path.Combine(projectFolderAbsolute, expandedPath));
-            }
-
-            fullStringsPath = YarnProjectImporter.GetRelativePath(expandedPath);
-
-            return true;
+            public string text;
+            public int index;
         }
 
-        /// <summary>
-        /// Gets the path, relative to the project's location on disk, to the
-        /// assets location associated with the given language code.
-        /// </summary>
-        /// <param name="project">The project to fetch path information
-        /// for.</param>
-        /// <param name="languageCode">A BCP-47 locale code.</param>
-        /// <param name="fullAssetsPath">On return, the relative path from
-        /// <paramref name="project"/>'s location on disk to the specified
-        /// locale's assets location, or <see langword="null"/> if it couldn't
-        /// be found.</param>
-        /// <returns><see langword="true"/> if the assets location could be found
-        /// for the given language code; <see langword="false"/>
-        /// otherwise.</returns>
-        public static bool TryGetAssetsPath(this Yarn.Compiler.Project project, string languageCode, out string? fullAssetsPath)
+        public bool IsSearching => string.IsNullOrEmpty(filterString) == false;
+        public bool HasProblems => problems.Count > 0;
+
+        private ReorderableList _list;
+        private string filterString;
+
+        private List<int> filteredIndices = new List<int>();
+        private List<Problem> problems = new List<Problem>();
+
+        private SerializedObject serializedObject;
+        private SerializedProperty serializedProperty;
+
+        public ReorderableDeclarationsList(SerializedObject serializedObject, SerializedProperty property)
         {
-            if (project.Localisation.TryGetValue(languageCode, out var info) == false)
+            this.serializedObject = serializedObject;
+            serializedProperty = property;
+
+            _list = new UnityEditorInternal.ReorderableList(serializedObject, property, false, true, true, true)
             {
-                fullAssetsPath = default;
-                return false;
-            }
-            if (string.IsNullOrEmpty(info.Assets))
+                drawHeaderCallback = (rect) => DrawListHeader(rect, "Declarations"),
+                drawElementCallback = (rect, index, isActive, isFocused) => DrawListElement(rect, index, isActive, isFocused, useSearch: true),
+                elementHeightCallback = (index) => GetElementHeight(index, useSearch: true),
+                onAddCallback = OnAdd,
+                onCanAddCallback = OnCanAdd,
+                onCanRemoveCallback = OnCanRemove,
+            };
+
+            UpdateProblems();
+        }
+
+        private void OnAdd(ReorderableList list)
+        {
+            serializedProperty.InsertArrayElementAtIndex(serializedProperty.arraySize);
+            var entry = serializedProperty.GetArrayElementAtIndex(serializedProperty.arraySize - 1);
+
+            // Clear necessary properties to something useful
+            var nameProp = entry.FindPropertyRelative("name");
+            var typeProp = entry.FindPropertyRelative("typeName");
+            var defaultValueStringProp = entry.FindPropertyRelative("defaultValueString");
+            var sourceYarnAssetProp = entry.FindPropertyRelative("sourceYarnAsset");
+            var descriptionProp = entry.FindPropertyRelative("description");
+
+            nameProp.stringValue = "$variable";
+            typeProp.enumValueIndex = YarnProjectImporter.SerializedDeclaration.BuiltInTypesList.IndexOf(Yarn.BuiltinTypes.String);
+            defaultValueStringProp.stringValue = string.Empty;
+            sourceYarnAssetProp.objectReferenceValue = null;
+            descriptionProp.stringValue = string.Empty;
+
+        }
+
+        private void UpdateProblems()
+        {
+            problems.Clear();
+
+            var declarations = Cast<SerializedProperty>(serializedProperty.GetEnumerator()).ToList();
+
+            // Find all variables with duplicate names
+            var names = declarations.Select((p, index) => new { name = p.FindPropertyRelative("name").stringValue, index });
+
+            var duplicateNames = names.GroupBy(s => s.name)
+                                    .Where(g => g.Count() > 1)
+                                    .Select(g => g.Key)
+                                    .ToList();
+
+            problems.AddRange(duplicateNames.Select(name => new Problem
             {
-                fullAssetsPath = default;
-                return false;
-            }
-            var projectFolderRelative = Path.GetDirectoryName(project.Path);
-            var projectFolderAbsolute = Path.GetFullPath(Path.Combine(YarnProjectImporter.UnityProjectRootPath, projectFolderRelative));
+                text = $"Duplicate variable name {name}",
+                index = names.First(n => n.name == name).index
+            }));
 
-            // am force unwrapping the strings due to a bug
-            // the IsNullOrEmpty check on this version of dotnet doesn't propogate it's understanding that the value isn't null
-            // in a future version this will go away as a concern.
-            var expandedPath = info.Assets!.Replace(YarnProjectImporter.UnityProjectRootVariable, YarnProjectImporter.UnityProjectRootPath);
+            var invalidVariableNames = names.Where(decl => decl.name.Equals(string.Empty) == false && !decl.name.StartsWith("$"));
 
-            if (Path.IsPathRooted(expandedPath) == false)
+            problems.AddRange(invalidVariableNames.Select(decl => new Problem { text = $"Variable name '{decl.name}' must begin with a $", index = decl.index }));
+
+            var emptyVariableNames = names.Where(name => string.IsNullOrEmpty(name.name));
+
+            problems.AddRange(emptyVariableNames.Select(decl => new Problem { text = $"Variable name must not be empty", index = decl.index }));
+
+        }
+
+        IEnumerable<T> Cast<T>(IEnumerator iterator)
+        {
+            while (iterator.MoveNext())
             {
-                expandedPath = Path.GetFullPath(Path.Combine(projectFolderAbsolute, expandedPath));
+                yield return (T)iterator.Current;
+            }
+        }
+
+        private bool OnCanRemove(ReorderableList list)
+        {
+            var isFromScript = serializedProperty.GetArrayElementAtIndex(list.index).FindPropertyRelative("sourceYarnAsset").objectReferenceValue != null;
+            return IsSearching == false && !isFromScript;
+        }
+
+        private bool OnCanAdd(ReorderableList list)
+        {
+            return IsSearching == false;
+        }
+
+        private bool ShouldShowElement(int index)
+        {
+            // If we're not searching then all indices are shown
+            if (IsSearching == false)
+            {
+                return true;
             }
 
-            fullAssetsPath = YarnProjectImporter.GetRelativePath(expandedPath);
+            // Otherwise, we show this element if its index is in the
+            // filtered list
+            return filteredIndices.Contains(index);
+        }
 
-            return true;
+        private float GetElementHeight(int index, bool useSearch)
+        {
+#if !UNITY_2022_1_OR_NEWER
+            // Before Unity 2022.1, this callback gets called with 
+            // index 0 even if the list is empty
+            if (serializedProperty.arraySize == 0)
+            {
+                return 0;
+            }
+#endif
+
+            if (useSearch == false || ShouldShowElement(index))
+            {
+                var item = serializedProperty.GetArrayElementAtIndex(index);
+                return DeclarationPropertyDrawer.GetPropertyHeightImpl(item, null);
+            }
+            else
+            {
+                return 0;
+            }
+        }
+
+        private void DrawListHeader(Rect rect, string label)
+        {
+            GUI.Label(rect, label);
+        }
+
+        private void DrawListElement(Rect rect, int index, bool isActive, bool isFocused, bool useSearch)
+        {
+            if (useSearch == false || ShouldShowElement(index))
+            {
+                var item = serializedProperty.GetArrayElementAtIndex(index);
+                EditorGUI.PropertyField(rect, item);
+            }
+        }
+
+        public void DrawLayout()
+        {
+            //serializedObject.Update();
+            EditorGUILayout.Space();
+
+            foreach (var problem in problems)
+            {
+                if (problem.index != -1)
+                {
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        EditorGUILayout.HelpBox(problem.text, MessageType.Error);
+                        if (GUILayout.Button("Select", GUILayout.ExpandWidth(false)))
+                        {
+                            _list.index = problem.index;
+                        }
+                    }
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox(problem.text, MessageType.Error);
+                }
+                EditorGUILayout.Space();
+            }
+
+            using (var changeCheck = new EditorGUI.ChangeCheckScope())
+            {
+                filterString = EditorGUILayout.TextField("Search", filterString);
+
+                if (changeCheck.changed)
+                {
+                    UpdateSearch(filterString);
+                }
+            }
+
+
+            using (var changeCheck = new EditorGUI.ChangeCheckScope())
+            {
+                _list.DoLayoutList();
+
+                if (changeCheck.changed)
+                {
+                    UpdateProblems();
+                }
+            }
+
+
+            if (IsSearching && filteredIndices.Count == 0)
+            {
+                EditorGUILayout.LabelField("No items to show.");
+            }
+        }
+
+        private void UpdateSearch(string filterString)
+        {
+            filteredIndices.Clear();
+
+            if (string.IsNullOrEmpty(filterString) == false)
+            {
+
+                var count = serializedProperty.arraySize;
+                for (int i = 0; i < count; i++)
+                {
+
+
+                    var item = serializedProperty.GetArrayElementAtIndex(i);
+
+                    var nameProperty = item.FindPropertyRelative("name");
+                    if (nameProperty.stringValue?.Contains(filterString) ?? false)
+                    {
+                        filteredIndices.Add(i);
+                    }
+                }
+            }
+        }
+    }
+
+    [CustomPropertyDrawer(typeof(YarnProjectImporter.SerializedDeclaration))]
+    public class DeclarationPropertyDrawer : PropertyDrawer
+    {
+        /// <summary>
+        /// Draws either a property field or a label field for <paramref
+        /// name="property"/> at <paramref name="position"/>, depending on
+        /// the value of <paramref name="readOnly"/>.
+        /// </summary>
+        /// <param name="position">The rectangle in which to draw the
+        /// control.</param>
+        /// <param name="property">The property to draw a control
+        /// for.</param>
+        /// <param name="readOnly">Whether the property is read-only or
+        /// not.</param>
+        private void DrawPropertyField(Rect position, SerializedProperty property, bool readOnly, string label = null)
+        {
+            if (label == null)
+            {
+                label = property.displayName;
+            }
+            if (readOnly)
+            {
+                switch (property.propertyType)
+                {
+                    case SerializedPropertyType.Integer:
+                        EditorGUI.LabelField(position, label, property.intValue.ToString());
+                        break;
+                    case SerializedPropertyType.Boolean:
+                        var boolText = property.boolValue ? "True" : "False";
+                        EditorGUI.LabelField(position, label, boolText);
+                        break;
+                    case SerializedPropertyType.Float:
+                        EditorGUI.LabelField(position, label, property.floatValue.ToString());
+                        break;
+                    case SerializedPropertyType.String:
+                        EditorGUI.LabelField(position, label, property.stringValue);
+                        break;
+                    case SerializedPropertyType.ObjectReference:
+                        using (new EditorGUI.DisabledGroupScope(true))
+                        {
+                            EditorGUI.ObjectField(position, property);
+                        }
+                        break;
+                    case SerializedPropertyType.Enum:
+                        var displayValue = property.enumDisplayNames[property.enumValueIndex];
+                        EditorGUI.LabelField(position, label, displayValue);
+                        break;
+                }
+            }
+            else
+            {
+                switch (property.propertyType)
+                {
+                    case SerializedPropertyType.String:
+                        property.stringValue = EditorGUI.TextField(position, label, property.stringValue);
+                        break;
+                    case SerializedPropertyType.Float:
+                        property.floatValue = EditorGUI.FloatField(position, label, property.floatValue);
+                        break;
+                    case SerializedPropertyType.Integer:
+                        property.floatValue = EditorGUI.IntField(position, label, property.intValue);
+                        break;
+                    default:
+                        // Just use a regular field for other kinds of
+                        // properties
+                        EditorGUI.PropertyField(position, property, new GUIContent(label));
+                        break;
+                }
+            }
+        }
+
+        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
+        {
+            EditorGUI.BeginProperty(position, label, property);
+
+            // A serialized declaration is read-only if it came from a Yarn
+            // script. We don't allow editing those in this panel, because
+            // the text of the Yarn script belongs to the user.
+            bool propertyIsReadOnly = property.FindPropertyRelative("sourceYarnAsset").objectReferenceValue != null;
+
+            propertyIsReadOnly |= property.FindPropertyRelative("isImplicit").boolValue;
+
+            const float leftInset = 8;
+
+            Rect RectForFieldIndex(int index, int lineCount = 1)
+            {
+                float verticalOffset = EditorGUIUtility.singleLineHeight * index + EditorGUIUtility.standardVerticalSpacing * index;
+                float height = EditorGUIUtility.singleLineHeight * lineCount + EditorGUIUtility.standardVerticalSpacing * (lineCount - 1);
+
+                return new Rect(
+                    position.x + leftInset,
+                    position.y + verticalOffset,
+                    position.width - leftInset,
+                    height
+                );
+            }
+
+            var foldoutPosition = RectForFieldIndex(0);
+
+            SerializedProperty nameProperty = property.FindPropertyRelative("name");
+            string name = nameProperty.stringValue;
+            if (string.IsNullOrEmpty(name))
+            {
+                name = "Variable";
+            }
+
+            property.isExpanded = EditorGUI.Foldout(foldoutPosition, property.isExpanded, name);
+
+            if (property.isExpanded)
+            {
+                var namePosition = RectForFieldIndex(1);
+                var typePosition = RectForFieldIndex(2);
+                var defaultValuePosition = RectForFieldIndex(3);
+                var descriptionPosition = RectForFieldIndex(4, 2);
+                var sourcePosition = RectForFieldIndex(6);
+
+                DrawPropertyField(namePosition, nameProperty, propertyIsReadOnly);
+
+                SerializedProperty typeProperty = property.FindPropertyRelative("typeName");
+
+                if (propertyIsReadOnly) {
+                    DrawPropertyField(typePosition, typeProperty, true);
+                } else {
+                    var popupElements = YarnProjectImporter.SerializedDeclaration.BuiltInTypesList;
+                    var popupElementNames = popupElements.Select(t => t.Name).ToList();
+                    var selectedIndex = popupElementNames.IndexOf(typeProperty.stringValue);
+
+                    var prefixPosition = EditorGUI.PrefixLabel(typePosition, new GUIContent("Type"));
+
+                    selectedIndex = EditorGUI.Popup(prefixPosition, selectedIndex, popupElementNames.ToArray());
+                    if (selectedIndex >= 0 && selectedIndex <= popupElementNames.Count) {
+                        typeProperty.stringValue = popupElementNames[selectedIndex];
+                    }
+                }
+
+                SerializedProperty defaultValueProperty;
+
+                var type = YarnProjectImporter.SerializedDeclaration.BuiltInTypesList.FirstOrDefault(t => t.Name == typeProperty.stringValue);
+
+                if (type == BuiltinTypes.Number) {
+                    defaultValueProperty = property.FindPropertyRelative("defaultValueNumber");
+                } else if (type == BuiltinTypes.String) {
+                    defaultValueProperty = property.FindPropertyRelative("defaultValueString");
+                } else if (type == BuiltinTypes.Boolean) {
+                    defaultValueProperty = property.FindPropertyRelative("defaultValueBool");
+                } else {
+                    defaultValueProperty = null;
+                }
+
+
+                if (defaultValueProperty == null)
+                {
+                    EditorGUI.LabelField(defaultValuePosition, "Default Value", $"Variable type {typeProperty.stringValue} is not allowed");
+                }
+                else
+                {
+                    DrawPropertyField(defaultValuePosition, defaultValueProperty, propertyIsReadOnly, "Default Value");
+                }
+
+
+                // Don't use DrawPropertyField here because we want to use
+                // a special gui style and directly use the string value
+                SerializedProperty descriptionProperty = property.FindPropertyRelative("description");
+                if (propertyIsReadOnly)
+                {
+                    descriptionPosition = EditorGUI.PrefixLabel(descriptionPosition, new GUIContent(descriptionProperty.displayName));
+                    EditorGUI.SelectableLabel(descriptionPosition, descriptionProperty.stringValue, EditorStyles.wordWrappedLabel);
+                }
+                else
+                {
+                    var wordWrappedTextField = EditorStyles.textField;
+                    wordWrappedTextField.wordWrap = true;
+
+                    descriptionProperty.stringValue = EditorGUI.TextField(descriptionPosition, descriptionProperty.displayName, descriptionProperty.stringValue, wordWrappedTextField);
+                }
+
+                if (!propertyIsReadOnly)
+                {
+                    EditorGUI.LabelField(sourcePosition, "Declared In", "this file");
+                }
+                else
+                {
+                    SerializedProperty sourceProperty = property.FindPropertyRelative("sourceYarnAsset");
+                    EditorGUI.ObjectField(sourcePosition, "Declared In", sourceProperty.objectReferenceValue, typeof(TextAsset), false);
+                }
+
+
+            }
+
+            EditorGUI.EndProperty();
+        }
+
+        public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+        {
+
+            return GetPropertyHeightImpl(property, label);
+        }
+
+        public static float GetPropertyHeightImpl(SerializedProperty property, GUIContent label)
+        {
+            int lines;
+
+            if (property.isExpanded)
+            {
+                lines = 7;
+            }
+            else
+            {
+                lines = 1;
+            }
+
+            return EditorGUIUtility.singleLineHeight * lines + EditorGUIUtility.standardVerticalSpacing * lines + 1;
+        }
+    }
+
+    // A simple class lets us use a delegate as an IEqualityComparer from
+    // https://stackoverflow.com/a/4607559
+    internal static class Compare
+    {
+        public static IEqualityComparer<T> By<T>(System.Func<T, T, bool> comparison)
+        {
+            return new DelegateComparer<T>(comparison);
+        }
+
+        private class DelegateComparer<T> : EqualityComparer<T>
+        {
+            private readonly System.Func<T, T, bool> comparison;
+
+            public DelegateComparer(System.Func<T, T, bool> identitySelector)
+            {
+                this.comparison = identitySelector;
+            }
+
+            public override bool Equals(T x, T y)
+            {
+                return comparison(x, y);
+            }
+
+            public override int GetHashCode(T obj)
+            {
+                // Force LINQ to never refer to the hash of an object by
+                // returning a constant for all values. This is inefficient
+                // because LINQ can't use an internal comparator, but we're
+                // already looking to use a delegate to do a more
+                // fine-grained test anyway, so we want to ensure that it's
+                // called.
+                return 0;
+            }
+        }
+    }
+
+    [CustomPropertyDrawer(typeof(FunctionInfo))]
+    public class DerivedFunctionsPropertyDrawer : PropertyDrawer
+    {
+        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
+        {
+            EditorGUI.BeginProperty(position, label, property);
+
+            const float leftInset = 8;
+
+            Rect RectForFieldIndex(int index, int lineCount = 1)
+            {
+                float verticalOffset = EditorGUIUtility.singleLineHeight * index + EditorGUIUtility.standardVerticalSpacing * index;
+                float height = EditorGUIUtility.singleLineHeight * lineCount + EditorGUIUtility.standardVerticalSpacing * (lineCount - 1);
+
+                return new Rect(
+                    position.x + leftInset,
+                    position.y + verticalOffset,
+                    position.width - leftInset,
+                    height
+                );
+            }
+
+            var foldoutPosition = RectForFieldIndex(0);
+
+            SerializedProperty nameProperty = property.FindPropertyRelative("Name");
+            string name = nameProperty?.stringValue ?? "FUNCTION NAME";
+
+            property.isExpanded = EditorGUI.Foldout(foldoutPosition, property.isExpanded, name);
+
+            if (property.isExpanded)
+            {
+                EditorGUI.indentLevel += 1;
+                var typePosition = RectForFieldIndex(1);
+                var paramPosition = RectForFieldIndex(2);
+
+                SerializedProperty typeProperty = property.FindPropertyRelative("ReturnType");
+                EditorGUI.LabelField(typePosition, typeProperty?.stringValue ?? "RETURN");
+
+                SerializedProperty paramProperty = property.FindPropertyRelative("Parameters");
+                int count = paramProperty?.arraySize ?? 0;
+                if (count > 0)
+                {
+                    string[] p = new string[count];
+                    for (int i = 0; i < count; i++)
+                    {
+                        p[i] = paramProperty.GetArrayElementAtIndex(i).stringValue;
+                    }
+                    EditorGUI.LabelField(paramPosition, $"({string.Join(", ", p)})");
+                }
+                else
+                {
+                    EditorGUI.LabelField(paramPosition, $"No Parameters");
+                }
+                EditorGUI.indentLevel -= 1;
+            }
+
+            EditorGUI.EndProperty();
+        }
+
+        public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+        {
+
+            int lines = 1;
+
+            if (property.isExpanded)
+            {
+                lines = 3;
+            }
+
+            return EditorGUIUtility.singleLineHeight * lines + EditorGUIUtility.standardVerticalSpacing * lines + 1;
+        }
+    }
+
+    [System.Serializable]
+    public class FunctionInfo
+    {
+        public string Name;
+        public string ReturnType;
+        public string[] Parameters;
+
+        public static FunctionInfo CreateFunctionInfoFromMethodGroup(System.Reflection.MethodInfo method)
+        {
+            var returnType = $"-> {method.ReturnType.Name}";
+
+            var parameters = method.GetParameters();
+            var p = new string[parameters.Count()];
+            for (int i = 0; i < parameters.Count(); i++)
+            {
+                var q = parameters[i].ParameterType;
+                p[i] = parameters[i].Name;
+            }
+
+            return new FunctionInfo
+            {
+                Name = method.Name,
+                ReturnType = returnType,
+                Parameters = p,
+            };
         }
     }
 }

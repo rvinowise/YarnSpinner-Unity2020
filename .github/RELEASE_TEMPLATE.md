@@ -1,6 +1,6 @@
 <!-- RELEASE_TEMPLATE.md is not a formally supported file used by GitHub. This file is used by .github/workflows/release.yml to add a release notes preface. -->
 
-Yarn Spinner is made possible by your generous patronage. Please consider supporting Yarn Spinner's development by [becoming a patron](https://patreon.com/secretlab), or by buying a copy of Yarn Spinner on [itch.io](https://yarnspinner.itch.io/yarn-spinner) or the [Unity Asset Store](https://assetstore.unity.com/packages/tools/behavior-ai/yarn-spinner-for-unity-267061)!
+Yarn Spinner is made possible by your generous patronage. Please consider supporting Yarn Spinner's development by [becoming a patron](https://patreon.com/secretlab)!
 
 <a href="https://patreon.com/secretlab"><img width="200" src="https://user-images.githubusercontent.com/901768/71883373-6f40ff80-318a-11ea-9d3a-01f1f58cb39e.png"></a>
 
@@ -9,8 +9,8 @@ Yarn Spinner is made possible by your generous patronage. Please consider suppor
 There are several places you can go to get help with Yarn Spinner.
 
 * Join the [Yarn Spinner Discord](https://discord.gg/yarnspinner).
-* Talk to us via [BlueSky](http://bsky.app/profile/yarnspinner.dev) or [Mastodon](https://team.yarnspinner.dev/@yarnspinner)
-* To report a bug, [file an issue on GitHub](https://github.com/YarnSpinnerTool/YarnSpinner-Unity/issues/new?labels=bug+beta&template=bug_report.md&title=).
+* Tweet at us, at [@YarnSpinnerTool](https://twitter.com/YarnSpinnerTool).
+* To report a bug, [file an issue on GitHub](https://github.com/YarnSpinnerTool/YarnSpinner-Unity/issues/new?labels=bug+beta&template=bug_report_beta.md&title=).
 
 ## 📦 How To Install Yarn Spinner
 

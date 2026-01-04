@@ -229,7 +229,7 @@ namespace Yarn.Unity
             }
 
             // Has the keycode been pressed this frame?
-            if (Input.GetKeyDown(continueActionKeyCode))
+            if (Input.GetKeyUp(continueActionKeyCode))
             {
                 // Indicate that we want to skip/continue.
                 dialogueView.UserRequestedViewAdvancement();

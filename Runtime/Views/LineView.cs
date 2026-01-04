@@ -426,8 +426,7 @@ namespace Yarn.Unity
         {
             // disabling interaction temporarily while dismissing the line
             // we don't want people to interrupt a dismissal
-            //#RVI after hiding the line -- it shouldn't be interactable
-            //var interactable = canvasGroup.interactable;
+            var interactable = canvasGroup.interactable;
             canvasGroup.interactable = false;
 
             // If we're using a fade effect, run it, and wait for it to finish.
@@ -439,8 +438,8 @@ namespace Yarn.Unity
             
             canvasGroup.alpha = 0;
             canvasGroup.blocksRaycasts = false;
-            // turning interaction back on, if it needs it //#RVI it'll turn on when presenting the next line
-            //canvasGroup.interactable = interactable;
+            // turning interaction back on, if it needs it
+            canvasGroup.interactable = interactable;
             onDismissalComplete();
         }
 
@@ -605,7 +604,6 @@ namespace Yarn.Unity
             // Our view should at be at full opacity.
             canvasGroup.alpha = 1f;
             canvasGroup.blocksRaycasts = true;
-            canvasGroup.interactable = true; // #RVI make it interactable onl when presenting the line
 
             // Show the continue button, if we have one.
             if (continueButton != null)
